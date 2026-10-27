@@ -34,6 +34,7 @@
   --manual:#3a2e17; --manual-line:#c98a2c; --lunch:#1c2619; --night:#171c26; --chip:#253041; --shadow:none; color-scheme:dark;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang TC","Microsoft JhengHei","Noto Sans TC","Heiti TC",sans-serif;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
 body.noscroll{overflow:hidden}
@@ -269,12 +270,15 @@ br.m{display:none}
     <h3>備份與還原</h3>
     <p class="muted small">資料只存在這台裝置的這個瀏覽器。iPhone 的主畫面 App 和 Safari 是分開存的；要換裝置或換瀏覽器，先在這裡匯出備份，再到另一邊匯入。</p>
     <div class="btns left">
-      <button class="btn ghost" id="btnBackup">匯出備份</button>
+      <button class="btn ghost" id="btnBackupShare">分享備份（LINE 等）</button>
+      <button class="btn ghost" id="btnBackup">下載備份檔</button>
       <label class="btn ghost filebtn">匯入備份<input type="file" id="fileBackup" accept=".json,application/json"></label>
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
+    <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome）。請按「下載備份檔」，再從 LINE 電腦版把檔案拖進聊天室傳送。</p>
+    <p class="muted small">從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">女二勤務表 v1.6</p>
+  <p class="ver muted small">女二勤務表 v1.7</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -1690,8 +1694,12 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
 
   /* ---------- 匯出 ---------- */
   const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  async function deliverFile(blob, name) {
-    if (isIOS && navigator.canShare) {
+  function canShareFiles() {
+    try { return !!(navigator.canShare && navigator.share && navigator.canShare({ files: [new File(['x'], 'a.json', { type: 'application/json' })] })); } catch (e) { return false; }
+  }
+  // mode：預設＝iPhone 分享、電腦下載；'share'＝一律開分享選單；'download'＝一律下載
+  async function deliverFile(blob, name, mode) {
+    if ((mode === 'share' || (mode !== 'download' && isIOS)) && navigator.canShare) {
       try {
         const f = new File([blob], name, { type: blob.type });
         if (navigator.canShare({ files: [f] })) {
@@ -2117,10 +2125,10 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
   }
 
-  function exportBackup() {
+  function exportBackup(mode) {
     const data = JSON.stringify({ app: 'duty-roster-f2', version: 1, savedAt: new Date().toISOString(), settings: state.settings, base: state.base, edits: state.edits }, null, 1);
     const d = new Date();
-    deliverFile(new Blob([data], { type: 'application/json' }), `女二勤務表備份_${d.getFullYear()}${E.pad2(d.getMonth() + 1)}${E.pad2(d.getDate())}.json`);
+    deliverFile(new Blob([data], { type: 'application/json' }), `女二勤務表備份_${d.getFullYear()}${E.pad2(d.getMonth() + 1)}${E.pad2(d.getDate())}_${E.pad2(d.getHours())}${E.pad2(d.getMinutes())}.json`, mode);
   }
   async function importBackup(file) {
     if (!file) return;
@@ -2181,7 +2189,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
     $('#viewSettings').addEventListener('click', e => {
       const wdb = e.target.closest('[data-wd]'); if (wdb) { editShift1Weekday(+wdb.dataset.wd); return; }
-      const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnAddFixedShift,#btnBackup,#btnResetHeader,#btnWipe');
+      const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnAddFixedShift,#btnBackup,#btnBackupShare,#btnResetHeader,#btnWipe');
       if (!t) return;
       if (t.dataset.ctdel !== undefined) { state.settings.customLeaveTypes.splice(+t.dataset.ctdel, 1); save(); render(); return; }
       if (t.id === 'btnAddCustomType') {
@@ -2197,7 +2205,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       else if (t.id === 'btnAddTeach') editRecurring('teaching', -1);
       else if (t.id === 'btnAddFixedLeave') editRecurring('fixedLeaves', -1);
       else if (t.id === 'btnAddFixedShift') editRecurring('fixedShifts', -1);
-      else if (t.id === 'btnBackup') exportBackup();
+      else if (t.id === 'btnBackup') exportBackup('download');
+      else if (t.id === 'btnBackupShare') exportBackup('share');
       else if (t.id === 'btnResetHeader') confirmBox('把機關名稱、表名、主管、備註文字恢復成原本範本的內容？', '恢復', () => { const d = E.defaultSettings(); ['agency', 'title', 'supervisor', 'footer'].forEach(k => state.settings[k] = d[k]); save(); render(); });
       else if (t.id === 'btnWipe') confirmBox('清除這台裝置上的所有資料（設定、基準表、修改）？建議先匯出備份。', '全部清除', () => { try { localStorage.removeItem(STORE_KEY); } catch (e) { } state = { settings: E.defaultSettings(), base: null, edits: {}, ui: { week: null, day: 0, view: 'settings' } }; save(); render(); toast('已清除'); });
     });
@@ -2205,6 +2214,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   }
 
   load(); bind(); render();
+  if (!canShareFiles()) { const b = $('#btnBackupShare'); if (b) b.hidden = true; const n = $('#shareNote'); if (n) n.hidden = false; }
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) {
     navigator.serviceWorker.register('sw.js').catch(() => { });
   }
