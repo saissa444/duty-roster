@@ -166,6 +166,9 @@ br.m{display:none}
   .daytab span{font-size:14px}
 }
 .ptable select{width:100%;padding:6px 4px}
+
+.exportrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.exportrow .btn{width:100%;padding:9px 6px}
 </style>
 </head>
 <body>
@@ -191,7 +194,7 @@ br.m{display:none}
         <button class="btn ghost sq" id="btnNextWeek" aria-label="下一週">›</button>
       </div>
       <div class="weekinfo" id="weekInfo"></div>
-      <button class="btn primary block" id="btnExport">匯出本週 Excel</button>
+      <div class="exportrow"><button class="btn primary" id="btnExport">匯出本週 Excel</button><button class="btn primary" id="btnExportPdf">匯出本週班表 PDF</button></div>
     </section>
     <nav class="daytabs" id="dayTabs"></nav>
     <div id="dayPanel"></div>
@@ -227,7 +230,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.0</p>
+  <p class="ver muted small">女二勤務表 v1.1</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -976,6 +979,430 @@ async function buildWorkbook(templateB64, days, settings) {
 
 window.XLSX_IO = { readWorkbook, buildWorkbook };
 </script>
+<script>/* Excel 工作表 → PDF（在瀏覽器用 canvas 依範本版面繪製，每張工作表一頁 A4） */
+'use strict';
+(function () {
+  const XNS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const RNS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const ANS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const XDR = 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing';
+  const DPI = 200;            // 輸出解析度
+  const MDW = 8;              // 預設字型（新細明體 12）最大數字寬（px @96dpi）
+  const PAGE_W_IN = 8.2677, PAGE_H_IN = 11.6929; // A4
+
+  const FONT_MAP = {
+    '標楷體': '"DFKai-SB","BiauKai","標楷體","BiauKaiTC","Kaiti TC","STKaiti","KaiTi",serif',
+    '新細明體': '"PMingLiU","新細明體","Apple LiSung","LiSong Pro","Songti TC","STSong",serif',
+    'Times New Roman': '"Times New Roman",Times,serif'
+  };
+  function fam(name) { return FONT_MAP[name] || (name ? `"${name}",` : '') + 'serif'; }
+
+  const parse = s => new DOMParser().parseFromString(s, 'application/xml');
+  const kids = (el, ns, name) => el ? Array.from(el.childNodes).filter(n => n.nodeType === 1 && n.localName === name && (!ns || n.namespaceURI === ns)) : [];
+  const kid = (el, ns, name) => kids(el, ns, name)[0] || null;
+  const attr = (el, n) => el ? el.getAttribute(n) : null;
+  function colNum(s) { let n = 0; for (const ch of s) n = n * 26 + ch.charCodeAt(0) - 64; return n; }
+  function addr(a) { const m = /^\$?([A-Z]+)\$?(\d+)$/.exec(a); return { c: colNum(m[1]), r: +m[2] }; }
+  function range(ref) { const [a, b] = ref.split(':'); const A = addr(a), B = addr(b || a); return { r1: Math.min(A.r, B.r), c1: Math.min(A.c, B.c), r2: Math.max(A.r, B.r), c2: Math.max(A.c, B.c) }; }
+  function resolve(base, target) { if (target.startsWith('/')) return target.slice(1); const p = base.split('/'); p.pop(); for (const s of target.split('/')) { if (s === '..') p.pop(); else if (s !== '.') p.push(s); } return p.join('/'); }
+
+  /* ---------- 樣式 ---------- */
+  function readFontEl(f) {
+    if (!f) return {};
+    const o = {};
+    const sz = kid(f, XNS, 'sz'); if (sz) o.sz = +attr(sz, 'val');
+    const nm = kid(f, XNS, 'name') || kid(f, XNS, 'rFont'); if (nm) o.name = attr(nm, 'val');
+    if (kid(f, XNS, 'b')) o.b = attr(kid(f, XNS, 'b'), 'val') !== '0';
+    if (kid(f, XNS, 'i')) o.i = attr(kid(f, XNS, 'i'), 'val') !== '0';
+    const col = kid(f, XNS, 'color'); if (col && attr(col, 'rgb')) o.color = '#' + attr(col, 'rgb').slice(-6);
+    return o;
+  }
+  function readStyles(doc) {
+    const root = doc.documentElement;
+    const fonts = kids(kid(root, XNS, 'fonts'), XNS, 'font').map(readFontEl);
+    const fills = kids(kid(root, XNS, 'fills'), XNS, 'fill').map(f => {
+      const p = kid(f, XNS, 'patternFill');
+      if (!p || attr(p, 'patternType') !== 'solid') return null;
+      const fg = kid(p, XNS, 'fgColor');
+      const rgb = fg && attr(fg, 'rgb');
+      return rgb ? '#' + rgb.slice(-6) : null;
+    });
+    const borders = kids(kid(root, XNS, 'borders'), XNS, 'border').map(b => {
+      const o = {};
+      ['left', 'right', 'top', 'bottom'].forEach(s => { const e = kid(b, XNS, s); const st = e && attr(e, 'style'); if (st) o[s] = st; });
+      return o;
+    });
+    const al = x => { const a = kid(x, XNS, 'alignment'); return a ? { h: attr(a, 'horizontal'), v: attr(a, 'vertical'), wrap: attr(a, 'wrapText') === '1' } : null; };
+    const styleXfs = kids(kid(root, XNS, 'cellStyleXfs'), XNS, 'xf').map(x => ({ align: al(x) }));
+    const xfs = kids(kid(root, XNS, 'cellXfs'), XNS, 'xf').map(x => {
+      const parent = styleXfs[+(attr(x, 'xfId') || 0)] || {};
+      const a = al(x) || parent.align || {};
+      return { font: fonts[+(attr(x, 'fontId') || 0)] || {}, fill: fills[+(attr(x, 'fillId') || 0)] || null, border: borders[+(attr(x, 'borderId') || 0)] || {}, h: a.h || 'general', v: a.v || 'bottom', wrap: !!a.wrap };
+    });
+    return { fonts, xfs, defFont: fonts[0] || { sz: 12, name: '新細明體' } };
+  }
+  function readRuns(si) {
+    // 回傳 [{t, font}]（font 只有覆寫的屬性）；忽略注音
+    const out = [];
+    for (const n of Array.from(si.childNodes)) {
+      if (n.nodeType !== 1) continue;
+      if (n.localName === 't') out.push({ t: n.textContent, font: {} });
+      else if (n.localName === 'r') {
+        const t = kid(n, XNS, 't');
+        out.push({ t: t ? t.textContent : '', font: readFontEl(kid(n, XNS, 'rPr')) });
+      }
+    }
+    return out;
+  }
+
+  /* ---------- 工作表模型 ---------- */
+  function readSheet(doc, styles, shared) {
+    const root = doc.documentElement;
+    const fmt = kid(root, XNS, 'sheetFormatPr');
+    const defW = +(attr(fmt, 'defaultColWidth') || 8.43);
+    const defH = +(attr(fmt, 'defaultRowHeight') || 15);
+    const cols = {};
+    kids(kid(root, XNS, 'cols'), XNS, 'col').forEach(c => {
+      for (let i = +attr(c, 'min'); i <= +attr(c, 'max'); i++) cols[i] = { w: +attr(c, 'width'), hidden: attr(c, 'hidden') === '1' };
+    });
+    const rows = {}, cells = {};
+    kids(kid(root, XNS, 'sheetData'), XNS, 'row').forEach(r => {
+      const rn = +attr(r, 'r');
+      rows[rn] = { h: attr(r, 'ht') ? +attr(r, 'ht') : null, hidden: attr(r, 'hidden') === '1' };
+      kids(r, XNS, 'c').forEach(c => {
+        const a = addr(attr(c, 'r'));
+        const t = attr(c, 't');
+        const v = kid(c, XNS, 'v');
+        let runs = null;
+        if (t === 's' && v) runs = shared[+v.textContent] || null;
+        else if (t === 'inlineStr') { const is = kid(c, XNS, 'is'); runs = is ? readRuns(is) : null; }
+        else if (v) runs = [{ t: v.textContent, font: {} }];
+        cells[a.r + ',' + a.c] = { s: +(attr(c, 's') || 0), runs, num: !t && !!v };
+      });
+    });
+    const merges = kids(kid(root, XNS, 'mergeCells'), XNS, 'mergeCell').map(m => range(attr(m, 'ref')));
+    const ps = kid(root, XNS, 'pageSetup');
+    const sp = kid(root, XNS, 'sheetPr');
+    const fit = sp && kid(sp, XNS, 'pageSetUpPr') && attr(kid(sp, XNS, 'pageSetUpPr'), 'fitToPage') === '1';
+    const pm = kid(root, XNS, 'pageMargins');
+    const po = kid(root, XNS, 'printOptions');
+    return {
+      defW, defH, cols, rows, cells, merges,
+      page: {
+        fit, scale: +(attr(ps, 'scale') || 100),
+        fitW: attr(ps, 'fitToWidth') === null ? 1 : +attr(ps, 'fitToWidth'),
+        fitH: attr(ps, 'fitToHeight') === null ? 1 : +attr(ps, 'fitToHeight'),
+        landscape: attr(ps, 'orientation') === 'landscape',
+        ml: +(attr(pm, 'left') || 0.7), mr: +(attr(pm, 'right') || 0.7), mt: +(attr(pm, 'top') || 0.75), mb: +(attr(pm, 'bottom') || 0.75),
+        hc: po && attr(po, 'horizontalCentered') === '1', vc: po && attr(po, 'verticalCentered') === '1'
+      },
+      drawing: null
+    };
+  }
+  function colPx(sh, c) { const d = sh.cols[c]; if (d && d.hidden) return 0; const w = d ? d.w : sh.defW; return Math.round(w * MDW); }
+  function rowPx(sh, r) { const d = sh.rows[r]; if (d && d.hidden) return 0; return ((d && d.h) || sh.defH) * 96 / 72; }
+
+  /* ---------- 繪製 ---------- */
+  function fontCss(f, base, k) {
+    const o = Object.assign({}, base, f || {});
+    const px = (o.sz || 12) * 96 / 72 * k;
+    return { css: `${o.i ? 'italic ' : ''}${o.b ? 'bold ' : ''}${px.toFixed(2)}px ${fam(o.name)}`, px, color: o.color || '#000' };
+  }
+  // 把 runs 斷行：回傳 lines = [[{t, css, px, color, w}]]
+  function layoutRuns(g, runs, baseFont, k, maxW, wrap) {
+    const lines = [[]];
+    let lineW = 0;
+    runs.forEach(run => {
+      const f = fontCss(run.font, baseFont, k);
+      g.font = f.css;
+      for (const ch of Array.from(run.t.replace(/\r/g, ''))) {
+        if (ch === '\n') { lines.push([]); lineW = 0; continue; }
+        const w = g.measureText(ch).width;
+        if (wrap && lineW + w > maxW && lines[lines.length - 1].length) { lines.push([]); lineW = 0; if (ch === ' ') continue; }
+        const L = lines[lines.length - 1];
+        const last = L[L.length - 1];
+        if (last && last.css === f.css && last.color === f.color) { last.t += ch; last.w += w; }
+        else L.push({ t: ch, css: f.css, px: f.px, color: f.color, w });
+        lineW += w;
+      }
+    });
+    return lines;
+  }
+  function drawText(g, runs, baseFont, rect, h, v, wrap, k, isNum) {
+    if (!runs || !runs.length || !runs.some(r => r.t)) return;
+    const pad = 2 * k;
+    const lines = layoutRuns(g, runs, baseFont, k, rect.w - pad * 2, wrap);
+    const lh = lines.map(L => Math.max(L.reduce((m, x) => Math.max(m, x.px), 0), fontCss({}, baseFont, k).px) * 1.2);
+    const total = lh.reduce((a, b) => a + b, 0);
+    let y = v === 'top' ? rect.y + pad : v === 'center' ? rect.y + (rect.h - total) / 2 : rect.y + rect.h - total - pad;
+    g.save();
+    g.beginPath(); g.rect(rect.x, rect.y, rect.w, rect.h); g.clip();
+    g.textBaseline = 'middle';
+    lines.forEach((L, i) => {
+      const w = L.reduce((a, x) => a + x.w, 0);
+      const hh = h === 'general' ? (isNum ? 'right' : 'left') : h;
+      const cy = y + lh[i] / 2;
+      if (hh === 'distributed' && L.length) {
+        const chars = [];
+        L.forEach(x => { g.font = x.css; Array.from(x.t).forEach(ch => chars.push({ ch, css: x.css, color: x.color, w: g.measureText(ch).width })); });
+        const sum = chars.reduce((a, c) => a + c.w, 0);
+        const gap = chars.length > 1 ? (rect.w - pad * 2 - sum) / (chars.length - 1) : 0;
+        let x = chars.length > 1 ? rect.x + pad : rect.x + (rect.w - sum) / 2;
+        chars.forEach(c => { g.font = c.css; g.fillStyle = c.color; g.fillText(c.ch, x, cy); x += c.w + Math.max(gap, 0); });
+      } else {
+        let x = hh === 'center' || hh === 'centerContinuous' ? rect.x + (rect.w - w) / 2 : hh === 'right' ? rect.x + rect.w - pad - w : rect.x + pad;
+        L.forEach(seg => { g.font = seg.css; g.fillStyle = seg.color; g.fillText(seg.t, x, cy); x += seg.w; });
+      }
+      y += lh[i];
+    });
+    g.restore();
+  }
+  const BW = { thin: 0.75, hair: 0.5, dotted: 0.75, dashed: 0.75, medium: 1.5, mediumDashed: 1.5, thick: 2.25, double: 2 };
+
+  function renderSheet(g, sh, styles, area, cw, ch, dpiK) {
+    // area: {r1,c1,r2,c2}；cw/ch：畫布大小（px）
+    const p = sh.page;
+    const xs = [0], ys = [0];
+    for (let c = area.c1; c <= area.c2; c++) xs.push(xs[xs.length - 1] + colPx(sh, c));
+    for (let r = area.r1; r <= area.r2; r++) ys.push(ys[ys.length - 1] + rowPx(sh, r));
+    const W = xs[xs.length - 1], H = ys[ys.length - 1];
+    const pw = (p.landscape ? PAGE_H_IN : PAGE_W_IN) * 96, ph = (p.landscape ? PAGE_W_IN : PAGE_H_IN) * 96;
+    const aw = pw - (p.ml + p.mr) * 96, ah = ph - (p.mt + p.mb) * 96;
+    let scale = p.scale / 100;
+    if (p.fit) {
+      scale = Math.min(p.fitW > 0 ? aw / W : Infinity, p.fitH > 0 ? ah / H : Infinity, 1);
+    }
+    if (H * scale > ah) scale = ah / H; // 單頁：放不下就再縮
+    const k = scale * dpiK;
+    const ox = (p.ml * 96 + (p.hc ? (aw - W * scale) / 2 : 0)) * dpiK;
+    const oy = (p.mt * 96 + (p.vc ? (ah - H * scale) / 2 : 0)) * dpiK;
+    const X = c => ox + xs[c - area.c1] * k, Y = r => oy + ys[r - area.r1] * k;
+    const rectOf = (r1, c1, r2, c2) => ({ x: X(c1), y: Y(r1), w: X(c2 + 1) - X(c1), h: Y(r2 + 1) - Y(r1) });
+
+    g.fillStyle = '#fff'; g.fillRect(0, 0, cw, ch);
+    const mergeAt = {};
+    sh.merges.forEach((m, i) => { for (let r = m.r1; r <= m.r2; r++) for (let c = m.c1; c <= m.c2; c++) mergeAt[r + ',' + c] = i; });
+    const inArea = (r, c) => r >= area.r1 && r <= area.r2 && c >= area.c1 && c <= area.c2;
+    // 底色
+    Object.keys(sh.cells).forEach(key => {
+      const [r, c] = key.split(',').map(Number); if (!inArea(r, c)) return;
+      const xf = styles.xfs[sh.cells[key].s]; if (!xf || !xf.fill) return;
+      const mi = mergeAt[key];
+      if (mi !== undefined) { const m = sh.merges[mi]; if (m.r1 !== r || m.c1 !== c) return; const R = rectOf(m.r1, m.c1, m.r2, m.c2); g.fillStyle = xf.fill; g.fillRect(R.x, R.y, R.w, R.h); }
+      else { const R = rectOf(r, c, r, c); g.fillStyle = xf.fill; g.fillRect(R.x, R.y, R.w, R.h); }
+    });
+    // 文字
+    Object.keys(sh.cells).forEach(key => {
+      const cell = sh.cells[key]; if (!cell.runs) return;
+      const [r, c] = key.split(',').map(Number); if (!inArea(r, c)) return;
+      const xf = styles.xfs[cell.s] || styles.xfs[0];
+      const mi = mergeAt[key];
+      let R;
+      if (mi !== undefined) { const m = sh.merges[mi]; if (m.r1 !== r || m.c1 !== c) return; R = rectOf(m.r1, m.c1, Math.min(m.r2, area.r2), Math.min(m.c2, area.c2)); }
+      else R = rectOf(r, c, r, c);
+      drawText(g, cell.runs, xf.font, R, xf.h, xf.v, xf.wrap, k, cell.num);
+    });
+    // 框線
+    const pxw = pt => Math.max(1, pt * DPI / 72);
+    g.strokeStyle = '#000'; g.lineCap = 'square';
+    Object.keys(sh.cells).forEach(key => {
+      const [r, c] = key.split(',').map(Number); if (!inArea(r, c)) return;
+      const xf = styles.xfs[sh.cells[key].s]; if (!xf) return;
+      const b = xf.border; const mi = mergeAt[key];
+      const interior = (dr, dc) => mi !== undefined && mergeAt[(r + dr) + ',' + (c + dc)] === mi;
+      const R = rectOf(r, c, r, c);
+      const line = (st, x1, y1, x2, y2) => { g.lineWidth = pxw(BW[st] || 0.75); g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); };
+      if (b.left && !interior(0, -1)) line(b.left, R.x, R.y, R.x, R.y + R.h);
+      if (b.right && !interior(0, 1)) line(b.right, R.x + R.w, R.y, R.x + R.w, R.y + R.h);
+      if (b.top && !interior(-1, 0)) line(b.top, R.x, R.y, R.x + R.w, R.y);
+      if (b.bottom && !interior(1, 0)) line(b.bottom, R.x, R.y + R.h, R.x + R.w, R.y + R.h);
+    });
+    // 圖形（文字方塊、斜線）
+    (sh.drawing || []).forEach(d => {
+      const px = (col, off) => { let x = 0; for (let c = area.c1; c < col + 1; c++) x += colPx(sh, c); return ox + (x * scale + off / 9525 * scale) * dpiK; };
+      const py = (row, off) => { let y = 0; for (let r = area.r1; r < row + 1; r++) y += rowPx(sh, r); return oy + (y * scale + off / 9525 * scale) * dpiK; };
+      const x1 = px(d.from.col, d.from.colOff), y1 = py(d.from.row, d.from.rowOff), x2 = px(d.to.col, d.to.colOff), y2 = py(d.to.row, d.to.rowOff);
+      if (d.kind === 'line') {
+        g.lineWidth = pxw(0.75); g.strokeStyle = d.stroke || '#000';
+        let ax = x1, ay = y1, bx = x2, by = y2;
+        if (d.flipH) { ax = x2; bx = x1; }
+        if (d.flipV) { ay = y2; by = y1; }
+        g.beginPath(); g.moveTo(ax, ay); g.lineTo(bx, by); g.stroke();
+        return;
+      }
+      if (d.fill) { g.fillStyle = d.fill; g.fillRect(x1, y1, x2 - x1, y2 - y1); }
+      if (d.stroke) { g.lineWidth = pxw(0.75); g.strokeStyle = d.stroke; g.strokeRect(x1, y1, x2 - x1, y2 - y1); }
+      if (d.paras && d.paras.length) {
+        const kk = scale * dpiK;
+        const ins = { l: d.ins.l / 9525 * kk, r: d.ins.r / 9525 * kk, t: d.ins.t / 9525 * kk, b: d.ins.b / 9525 * kk };
+        let y = y1 + ins.t;
+        g.save(); g.textBaseline = 'middle';
+        d.paras.forEach(para => {
+          const runs = para.runs.map(r => ({ t: r.t, font: { sz: r.sz, b: r.b, name: r.font } }));
+          const base = { sz: 11, name: '標楷體' };
+          const lines = layoutRuns(g, runs.length ? runs : [{ t: ' ', font: {} }], base, kk, x2 - x1 - ins.l - ins.r, true);
+          lines.forEach(L => {
+            const lh = Math.max(L.reduce((m, x) => Math.max(m, x.px), 0), 11 * 96 / 72 * kk) * 1.2;
+            const w = L.reduce((a, x) => a + x.w, 0);
+            let x = para.algn === 'ctr' ? x1 + (x2 - x1 - w) / 2 : para.algn === 'r' ? x2 - ins.r - w : x1 + ins.l;
+            L.forEach(seg => { g.font = seg.css; g.fillStyle = seg.color; g.fillText(seg.t, x, y + lh / 2); x += seg.w; });
+            y += lh;
+          });
+        });
+        g.restore();
+      }
+    });
+  }
+
+  function readDrawing(doc) {
+    const out = [];
+    const anchors = Array.from(doc.getElementsByTagNameNS(XDR, 'twoCellAnchor'));
+    anchors.forEach(a => {
+      const pos = el => ({ col: +kid(el, XDR, 'col').textContent, colOff: +kid(el, XDR, 'colOff').textContent, row: +kid(el, XDR, 'row').textContent, rowOff: +kid(el, XDR, 'rowOff').textContent });
+      const from = pos(kid(a, XDR, 'from')), to = pos(kid(a, XDR, 'to'));
+      const sp = kid(a, XDR, 'sp') || kid(a, XDR, 'cxnSp');
+      if (!sp) return;
+      const spPr = kid(sp, XDR, 'spPr');
+      const xfrm = spPr && kid(spPr, ANS, 'xfrm');
+      const geom = spPr && kid(spPr, ANS, 'prstGeom');
+      const prst = geom ? attr(geom, 'prst') : 'rect';
+      const colorOf = el => {
+        if (!el) return null;
+        if (kid(el, ANS, 'noFill')) return null;
+        const sf = kid(el, ANS, 'solidFill'); if (!sf) return undefined;
+        const rgb = kid(sf, ANS, 'srgbClr'); if (rgb) return '#' + attr(rgb, 'val');
+        const sc = kid(sf, ANS, 'schemeClr'); if (sc) return ({ lt1: '#ffffff', bg1: '#ffffff', dk1: '#000000', tx1: '#000000' })[attr(sc, 'val')] || '#000000';
+        return '#000000';
+      };
+      const fill = spPr ? colorOf(spPr) : null;
+      const ln = spPr && kid(spPr, ANS, 'ln');
+      let stroke = ln ? colorOf(ln) : null;
+      const d = { from, to, flipH: xfrm && attr(xfrm, 'flipH') === '1', flipV: xfrm && attr(xfrm, 'flipV') === '1' };
+      if (prst === 'line' || prst === 'straightConnector1' || sp.localName === 'cxnSp') {
+        d.kind = 'line'; d.stroke = stroke === undefined || stroke === null ? '#000000' : stroke; out.push(d); return;
+      }
+      d.kind = 'box'; d.fill = fill || null; d.stroke = stroke || null;
+      const tx = kid(sp, XDR, 'txBody');
+      d.paras = []; d.ins = { l: 91440, r: 91440, t: 45720, b: 45720 };
+      if (tx) {
+        const bp = kid(tx, ANS, 'bodyPr');
+        if (bp) ['l', 'r', 't', 'b'].forEach(s => { const v = attr(bp, s + 'Ins'); if (v !== null) d.ins[s] = +v; });
+        kids(tx, ANS, 'p').forEach(p => {
+          const pPr = kid(p, ANS, 'pPr');
+          const para = { algn: pPr ? attr(pPr, 'algn') : null, runs: [] };
+          kids(p, ANS, 'r').forEach(r => {
+            const rPr = kid(r, ANS, 'rPr');
+            const t = kid(r, ANS, 't');
+            const ea = rPr && (kid(rPr, ANS, 'ea') || kid(rPr, ANS, 'latin'));
+            para.runs.push({ t: t ? t.textContent : '', sz: rPr && attr(rPr, 'sz') ? +attr(rPr, 'sz') / 100 : 11, b: rPr && attr(rPr, 'b') === '1', font: ea ? attr(ea, 'typeface') : '標楷體' });
+          });
+          d.paras.push(para);
+        });
+      }
+      out.push(d);
+    });
+    return out;
+  }
+
+  /* 計算列印範圍：定義名稱優先，否則取有內容或框線、底色的範圍 */
+  function printArea(sh, styles, defined) {
+    if (defined) return range(defined.replace(/^.*!/, '').replace(/\$/g, ''));
+    let r1 = Infinity, c1 = Infinity, r2 = 0, c2 = 0;
+    Object.keys(sh.cells).forEach(key => {
+      const [r, c] = key.split(',').map(Number);
+      const cell = sh.cells[key]; const xf = styles.xfs[cell.s] || {};
+      const vis = (cell.runs && cell.runs.some(x => x.t)) || xf.fill || (xf.border && Object.keys(xf.border).length);
+      if (!vis) return;
+      r1 = Math.min(r1, r); c1 = Math.min(c1, c); r2 = Math.max(r2, r); c2 = Math.max(c2, c);
+    });
+    sh.merges.forEach(m => { if (m.r1 >= r1 && m.r1 <= r2 && m.c1 >= c1 && m.c1 <= c2) { r2 = Math.max(r2, m.r2); c2 = Math.max(c2, m.c2); } });
+    return { r1: Math.min(r1, 1), c1: Math.min(c1, 1), r2, c2 };
+  }
+
+  /* ---------- 簡易 PDF（每頁一張 JPEG） ---------- */
+  function buildPdf(pages) {
+    // pages: [{jpeg:Uint8Array, w, h, pw, ph}]（pw/ph 單位 pt）
+    const enc = new TextEncoder();
+    const chunks = []; let len = 0; const offs = [];
+    const push = d => { const b = typeof d === 'string' ? enc.encode(d) : d; chunks.push(b); len += b.length; };
+    push('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n'.replace(/[\u0080-ÿ]/g, c => c)); // 標頭
+    const n = pages.length;
+    // 物件編號：1 catalog、2 pages、之後每頁 3 個（page、content、image）
+    const obj = (id, body) => { offs[id] = len; push(`${id} 0 obj\n`); if (typeof body === 'function') body(); else push(body); push('\nendobj\n'); };
+    obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+    const kidsRef = pages.map((_, i) => `${3 + i * 3} 0 R`).join(' ');
+    obj(2, `<< /Type /Pages /Kids [${kidsRef}] /Count ${n} >>`);
+    pages.forEach((p, i) => {
+      const pid = 3 + i * 3, cid = pid + 1, iid = pid + 2;
+      obj(pid, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${p.pw.toFixed(2)} ${p.ph.toFixed(2)}] /Resources << /XObject << /Im${i} ${iid} 0 R >> >> /Contents ${cid} 0 R >>`);
+      const content = `q ${p.pw.toFixed(2)} 0 0 ${p.ph.toFixed(2)} 0 0 cm /Im${i} Do Q`;
+      obj(cid, `<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+      obj(iid, () => { push(`<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${p.jpeg.length} >>\nstream\n`); push(p.jpeg); push('\nendstream'); });
+    });
+    const xref = len;
+    const total = 3 + n * 3;
+    let x = `xref\n0 ${total}\n0000000000 65535 f \n`;
+    for (let i = 1; i < total; i++) x += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
+    push(x);
+    push(`trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    return new Blob(chunks, { type: 'application/pdf' });
+  }
+
+  function canvasJpeg(cv) {
+    return new Promise((res, rej) => {
+      if (cv.toBlob) cv.toBlob(b => b ? b.arrayBuffer().then(a => res(new Uint8Array(a))) : rej(new Error('無法產生圖片')), 'image/jpeg', 0.92);
+      else { const u = cv.toDataURL('image/jpeg', 0.92); const bin = atob(u.split(',')[1]); const a = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); res(a); }
+    });
+  }
+
+  /* xlsxBlob：匯出的活頁簿；sheetIndexes：要輸出的工作表（0 起算），預設全部 */
+  async function workbookToPdf(xlsxBlob, sheetIndexes) {
+    const zip = await JSZip.loadAsync(xlsxBlob);
+    const styles = readStyles(parse(await zip.file('xl/styles.xml').async('string')));
+    let shared = [];
+    const ssf = zip.file('xl/sharedStrings.xml');
+    if (ssf) shared = kids(parse(await ssf.async('string')).documentElement, XNS, 'si').map(readRuns);
+    const wb = parse(await zip.file('xl/workbook.xml').async('string'));
+    const rels = parse(await zip.file('xl/_rels/workbook.xml.rels').async('string'));
+    const relMap = {}; Array.from(rels.getElementsByTagName('Relationship')).forEach(r => { relMap[r.getAttribute('Id')] = r.getAttribute('Target'); });
+    const sheets = Array.from(wb.getElementsByTagNameNS(XNS, 'sheet'));
+    const defs = {};
+    Array.from(wb.getElementsByTagNameNS(XNS, 'definedName')).forEach(d => { if (attr(d, 'name') === '_xlnm.Print_Area' && attr(d, 'localSheetId') !== null) defs[+attr(d, 'localSheetId')] = d.textContent; });
+    const idx = sheetIndexes || sheets.map((_, i) => i);
+    const dpiK = DPI / 96;
+    const cv = document.createElement('canvas');
+    const g = cv.getContext('2d');
+    const pages = [];
+    for (const i of idx) {
+      const s = sheets[i];
+      const path = resolve('xl/workbook.xml', relMap[s.getAttributeNS(RNS, 'id') || s.getAttribute('r:id')]);
+      const doc = parse(await zip.file(path).async('string'));
+      const sh = readSheet(doc, styles, shared);
+      // 圖形
+      const relPath = path.replace(/([^/]+)$/, '_rels/$1.rels');
+      const rf = zip.file(relPath);
+      const dEl = kid(doc.documentElement, XNS, 'drawing');
+      if (rf && dEl) {
+        const rd = parse(await rf.async('string'));
+        const rid = dEl.getAttributeNS(RNS, 'id') || dEl.getAttribute('r:id');
+        const rel = Array.from(rd.getElementsByTagName('Relationship')).find(r => r.getAttribute('Id') === rid);
+        if (rel) { const df = zip.file(resolve(path, rel.getAttribute('Target'))); if (df) sh.drawing = readDrawing(parse(await df.async('string'))); }
+      }
+      const area = printArea(sh, styles, defs[i]);
+      const land = sh.page.landscape;
+      const w = Math.round((land ? PAGE_H_IN : PAGE_W_IN) * DPI), h = Math.round((land ? PAGE_W_IN : PAGE_H_IN) * DPI);
+      cv.width = w; cv.height = h;
+      renderSheet(g, sh, styles, area, w, h, dpiK);
+      pages.push({ jpeg: await canvasJpeg(cv), w, h, pw: (land ? PAGE_H_IN : PAGE_W_IN) * 72, ph: (land ? PAGE_W_IN : PAGE_H_IN) * 72 });
+      await new Promise(r => setTimeout(r, 0));
+    }
+    cv.width = cv.height = 1;
+    return buildPdf(pages);
+  }
+
+  window.PDF_IO = { workbookToPdf };
+})();
+</script>
 <script>/* 女二勤務表 — 介面 */
 'use strict';
 (function () {
@@ -1119,10 +1546,9 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 30000);
   }
-  async function exportWeek() {
-    const w = currentWeek(); if (!w) return;
+  function weekDaysValues(w) {
     const c = ctx();
-    const days = E.weekDays(w).map(iso => {
+    return E.weekDays(w).map(iso => {
       const r = E.computeDay(c, iso);
       const values = {};
       E.COL_KEYS.forEach(col => { for (let k = 0; k < E.SLOT_COUNT; k++) { const a = col + E.slotRow(k); values[a] = r.final[a] === undefined ? '' : r.final[a]; } });
@@ -1130,17 +1556,30 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       const tot = r.final.Z47;
       if (tot !== '' && tot !== null && !isNaN(+tot)) values.Z47 = +tot;
       values.W1 = r.final.W1; values.E63 = r.final.E63;
-      // 中午合併格右半保持空白
-      values['O21'] = values['O21'] || ''; values['O23'] = values['O23'] || '';
+      values['O21'] = ''; values['O23'] = ''; // 中午合併格右半保持空白
       return { iso, sheetName: E.sheetNameFor(iso), values };
     });
+  }
+  let busy = false;
+  async function exportWeek(kind) {
+    const w = currentWeek(); if (!w || busy) return;
+    const btn = kind === 'pdf' ? $('#btnExportPdf') : $('#btnExport');
+    const label = btn.textContent;
+    busy = true; $('#btnExport').disabled = true; $('#btnExportPdf').disabled = true; btn.textContent = '產生中…';
     try {
-      const btn = $('#btnExport'); btn.disabled = true; btn.textContent = '產生中…';
-      const blob = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, days, state.settings);
-      await deliverFile(blob, E.fileNameFor(w));
-      toast('已產生 ' + E.fileNameFor(w));
+      const xlsx = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, weekDaysValues(w), state.settings);
+      const name = E.fileNameFor(w);
+      if (kind === 'pdf') {
+        const pdf = await window.PDF_IO.workbookToPdf(xlsx);
+        const pdfName = name.replace(/\.xlsx$/, '.pdf');
+        await deliverFile(pdf, pdfName);
+        toast('已產生 ' + pdfName);
+      } else {
+        await deliverFile(xlsx, name);
+        toast('已產生 ' + name);
+      }
     } catch (e) { toast('匯出失敗：' + (e.message || e), true); }
-    finally { const btn = $('#btnExport'); btn.disabled = false; btn.textContent = '匯出本週 Excel'; }
+    finally { busy = false; $('#btnExport').disabled = false; $('#btnExportPdf').disabled = false; btn.textContent = label; }
   }
 
   /* ---------- 畫面 ---------- */
@@ -1457,7 +1896,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   function bind() {
     $('#fileBase').addEventListener('change', e => { importBase(e.target.files[0]); e.target.value = ''; });
     $('#weekSel').addEventListener('change', e => { state.ui.week = e.target.value; save(); render(); });
-    $('#btnExport').addEventListener('click', exportWeek);
+    $('#btnExport').addEventListener('click', () => exportWeek('xlsx'));
+    $('#btnExportPdf').addEventListener('click', () => exportWeek('pdf'));
     $('#btnSettings').addEventListener('click', () => { state.ui.view = state.ui.view === 'settings' ? 'roster' : 'settings'; save(); render(); window.scrollTo(0, 0); });
     $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modal').classList.contains('open')) closeModal(); });
