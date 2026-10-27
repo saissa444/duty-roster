@@ -226,8 +226,8 @@ br.m{display:none}
       <div class="weekinfo" id="weekInfo"></div>
       <p class="exlabel">一般版<small>7 張勤務分配表＋1 張勤務變更表</small></p>
       <div class="exportrow"><button class="btn primary" id="btnExport">匯出本週 Excel</button><button class="btn primary" id="btnExportPdf">匯出本週班表 PDF</button></div>
-      <p class="exlabel">送核版<small>雙面列印：正面勤務分配表、背面勤務變更表，共 14 頁</small></p>
-      <div class="exportrow"><button class="btn primary alt" id="btnDuplexXlsx">送核版匯出 Excel</button><button class="btn primary alt" id="btnDuplexPdf">送核版匯出 PDF</button></div>
+      <p class="exlabel">列印用<small>雙面列印：正面勤務分配表、背面勤務變更表，共 14 頁</small></p>
+      <div class="exportrow"><button class="btn primary alt" id="btnDuplexXlsx">列印用匯出 Excel</button><button class="btn primary alt" id="btnDuplexPdf">列印用匯出 PDF</button></div>
     </section>
     <nav class="daytabs" id="dayTabs"></nav>
     <div id="dayPanel"></div>
@@ -297,7 +297,7 @@ br.m{display:none}
     <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome），請按「下載備份檔」。</p>
     <p class="muted small">用 LINE 傳備份：iPhone 先按「下載備份檔」，再到 LINE 聊天室點「＋」→「檔案」選取；電腦則用 LINE 電腦版把檔案拖進聊天室。從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">勤務表 v2.2</p>
+  <p class="ver muted small">勤務表 v2.3</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -1080,7 +1080,7 @@ async function buildWorkbook(templateB64, days, settings, opts) {
     ig.appendChild(ie);
     zip.file(`xl/worksheets/sheet${i + 1}.xml`, toXml(ser, doc));
   }
-  // ---- 工作表排列：一般版＝7 天＋變更表；送核版＝每天後面接一張變更表（雙面列印用） ----
+  // ---- 工作表排列：一般版＝7 天＋變更表；列印用＝每天後面接一張變更表（雙面列印用） ----
   const VT = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes';
   const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
   const CTNS = 'http://schemas.openxmlformats.org/package/2006/content-types';
@@ -2239,7 +2239,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   function updateFilePreview() {
     const w = state.base && state.base.weeks.length ? (currentWeek() || state.base.weeks[0]) : { sunday: '2026-11-01' };
     const el = $('#filePreview'); if (!el) return;
-    el.innerHTML = `檔名預覽：<b>${esc(E.fileNameFor(w, state.settings))}</b>、<b>${esc(E.fileNameFor(w, state.settings, { ext: '.pdf' }))}</b>（一般版與送核版同名）`;
+    el.innerHTML = `檔名預覽：<b>${esc(E.fileNameFor(w, state.settings))}</b>、<b>${esc(E.fileNameFor(w, state.settings, { ext: '.pdf' }))}</b>（一般版與列印用同名）`;
   }
   function wdSummary(p) {
     const m = p.shift1ByWeekday || {};
