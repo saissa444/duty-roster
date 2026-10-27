@@ -299,7 +299,7 @@ br.m{display:none}
     <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome），請按「下載備份檔」。</p>
     <p class="muted small">用 LINE 傳備份：iPhone 先按「下載備份檔」，再到 LINE 聊天室點「＋」→「檔案」選取；電腦則用 LINE 電腦版把檔案拖進聊天室。從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">勤務表 v2.6</p>
+  <p class="ver muted small">勤務表 v2.7</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -2040,7 +2040,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         <ul class="leaves">${leaves || '<li class="muted">尚無登錄</li>'}</ul>
         <button class="btn ghost" id="btnAddLeave">＋ 登錄補休／休假／公假</button></section>
       <section class="card"><h3>勤務分配預覽 <small>點格子可修改${nManual ? `・已手動改 ${nManual} 格` : ''}</small></h3>
-        <div class="legend"><span><i class="lg changed"></i>和基準表原排不同（差假、班別修改）</span><span><i class="lg manual"></i>手動修改的格子</span></div>
+        <div class="legend"><span><i class="lg changed"></i>差假狀況有更改</span><span><i class="lg manual"></i>手動修改的格子</span></div>
         <div class="gridwrap">${gridHtml(r)}</div>
         <div class="gridwrap">${leaveHtml(r)}</div>
         <pre class="footer">${esc(r.final.E63)}</pre>
@@ -2057,7 +2057,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const v = r.final[addr] === undefined ? '' : r.final[addr];
     const manual = Object.prototype.hasOwnProperty.call(r.manual, addr);
     const b0 = r.base0 ? (r.base0.final[addr] === undefined ? '' : r.base0.final[addr]) : v;
-    const changed = !manual && String(b0) !== String(v);
+    const isLeaveCell = Object.values(E.LEAVE_ADDR).includes(addr); // 只在差假狀況表標示
+    const changed = isLeaveCell && !manual && String(b0) !== String(v);
     const tip = manual ? '手動修改' : changed ? `原本：${b0 === '' ? '（空白）' : b0}` : '';
     return `<td class="c${manual ? ' manual' : ''}${changed ? ' changed' : ''}${v === '' ? ' empty' : ''}" data-cell="${addr}"${tip ? ` title="${esc(tip)}"` : ''}${extra || ''}>${esc(v)}</td>`;
   }
