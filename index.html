@@ -173,6 +173,8 @@ br.m{display:none}
 .exlabel small{font-weight:400;color:var(--muted);margin-left:6px;font-size:12.5px}
 .btn.primary.alt{background:#2f6b4f;border-color:#2f6b4f}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .btn.primary.alt{background:#6fbf98;border-color:#6fbf98}}
+.badge{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;background:var(--accent);color:var(--brand);margin-left:2px}
+.leaves li .btn.sm{margin-left:auto}
 </style>
 </head>
 <body>
@@ -221,6 +223,12 @@ br.m{display:none}
     <button class="btn ghost" id="btnAddTeach">＋ 新增兼課</button>
   </section>
   <section class="card">
+    <h3>固定公假</h3>
+    <p class="muted small">每週固定時間的公假（例如固定會議、受訓），符合的日子會自動登錄成「公假」。</p>
+    <ul class="tlist" id="fixedLeaveList"></ul>
+    <button class="btn ghost" id="btnAddFixedLeave">＋ 新增固定公假</button>
+  </section>
+  <section class="card">
     <h3>表頭與備註文字</h3>
     <label class="fld">機關名稱（左上）<textarea id="setAgency" rows="2"></textarea></label>
     <label class="fld">表名<input id="setTitle"></label>
@@ -237,7 +245,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.2</p>
+  <p class="ver muted small">女二勤務表 v1.3</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -523,7 +531,8 @@ function defaultSettings() {
     title: '第一大隊女生2隊勤務分配表',
     supervisor: '主管：',
     footer: '＊因應落實職務代理制度，各級幹部因故未在隊或為編排勤務時，請依職務順位落實代理工作，以健全管理作為。\n＊勤務項目可照勤務實際狀況增減\n＊勤務變更請於頁後填記。並經主管核章。',
-    teaching: []
+    teaching: [],
+    fixedLeaves: []
   };
 }
 
@@ -571,7 +580,25 @@ function baseShift(ctx, p, iso) {
   return { code: cell.code || '', s, e, src: ov !== undefined ? 'edit' : 'base' };
 }
 
-function leavesOf(ctx, iso) { return (dayEdit(ctx, iso).leaves || []); }
+function manualLeaves(ctx, iso) { return (dayEdit(ctx, iso).leaves || []); }
+/* 差假：手動登錄＋設定頁的固定公假（當天有班、且時段和班別重疊才套用） */
+function leavesOf(ctx, iso) {
+  const manual = manualLeaves(ctx, iso);
+  const out = manual.slice();
+  (ctx.settings.fixedLeaves || []).forEach((f, idx) => {
+    if (!teachingOn(f, iso)) return;
+    const p = f.person;
+    if (manual.some(l => l.p === p && (l.s === undefined || l.s === null || l.s === ''))) return; // 已有全天差假
+    const sh = baseShift(ctx, p, iso);
+    if (!sh) return; // 當天沒班（輪休）不套用
+    if (f.allDay) { out.push({ p, type: '公假', fixed: true, idx }); return; }
+    let a = +f.from, b = +f.to; if (b <= a) b += 24;
+    if (Math.max(a, sh.s) >= Math.min(b, sh.e)) return; // 時段沒有重疊（例如 21 點才起班）
+    if (manual.some(l => l.p === p && l.type === '公假' && +l.s === a && +l.e === (b > 24 ? b - 24 : b))) return;
+    out.push({ p, type: '公假', s: a, e: b > 24 ? b - 24 : b, fixed: true, idx });
+  });
+  return out;
+}
 
 function effShift(ctx, p, iso) {
   const sh = baseShift(ctx, p, iso);
@@ -790,7 +817,7 @@ const Engine = {
   PERSONS, ORDER, NUM, LEAVE_TYPES, WEEKDAY_ZH, COLS, COL_KEYS, SLOT_COUNT, LUNCH, LEAVE_ADDR,
   pad2, slotRow, slotLabel, rangeLabel, joinCodes, sortCodes, isoOf, dateOf, addDays, weekdayOf, rocParts, mdLabel,
   parseRange, parseShiftCell, parseBase, looksLikeBase, defaultSettings, makeContext, baseShift, effShift, computeDay,
-  weekDays, fileNameFor, sheetNameFor, teachingOn, normText
+  weekDays, fileNameFor, sheetNameFor, teachingOn, normText, leavesOf
 };
 if (typeof module !== 'undefined') module.exports = Engine;
 if (typeof window !== 'undefined') window.Engine = Engine;
@@ -1718,7 +1745,9 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       return `<div class="srow${changed ? ' changed' : ''}"><div class="who">${star}<b>${p}</b><span>${esc(personName(p))}</span></div>
         <button class="shiftbtn" data-shift="${p}">${esc(shiftText(sh))}${changed ? '<em>已修改</em>' : ''}</button></div>`;
     }).join('');
-    const leaves = (ed.leaves || []).map((l, i) => `<li><b>${esc(l.p)}</b> ${esc(l.type)} ${l.s === undefined || l.s === null || l.s === '' ? '全天' : esc(E.rangeLabel(+l.s, +l.e))}<button class="x" data-delleave="${i}" aria-label="刪除">✕</button></li>`).join('');
+    const lvTxt = l => `<b>${esc(l.p)}</b> ${esc(l.type)} ${l.s === undefined || l.s === null || l.s === '' ? '全天' : esc(E.rangeLabel(+l.s, +l.e))}`;
+    const leaves = (ed.leaves || []).map((l, i) => `<li>${lvTxt(l)}<button class="x" data-delleave="${i}" aria-label="刪除">✕</button></li>`)
+      .concat(E.leavesOf(c, iso).filter(l => l.fixed).map(l => `<li>${lvTxt(l)} <span class="badge">固定公假</span><button class="btn ghost sm" data-skipfixed="${l.idx}">這天不套用</button></li>`)).join('');
     const msgs = r.warnings.map(x => `<li class="w">${esc(x)}</li>`).concat(r.info.map(x => `<li class="i">${esc(x)}</li>`)).join('');
     const nManual = Object.keys(ed.cells || {}).length;
     $('#dayPanel').innerHTML = `
@@ -1909,25 +1938,36 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       <tr><td><b>${esc(p.code)}</b></td><td><input data-pi="${i}" data-pf="title" value="${esc(p.title)}"></td><td><input data-pi="${i}" data-pf="name" value="${esc(p.name)}"></td>
       <td><select data-pi="${i}" data-pf="shift1"><option${p.shift1 === o1 ? ' selected' : ''}>${o1}</option>${o2 ? `<option${p.shift1 === o2 ? ' selected' : ''}>${o2}</option>` : ''}</select></td></tr>`).join('')}</tbody></table>`;
     $('#setAgency').value = S.agency; $('#setTitle').value = S.title; $('#setSupervisor').value = S.supervisor; $('#setFooter').value = S.footer;
-    const tl = (S.teaching || []).map((t, i) => `<li><div><b>${esc(t.person)}</b> 每週${WD[+t.weekday]} ${E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
-      <span><button class="btn ghost sm" data-tedit="${i}">編輯</button><button class="btn ghost sm" data-tdel="${i}">刪除</button></span></li>`).join('');
-    $('#teachList').innerHTML = tl || '<li class="muted">尚未設定</li>';
+    const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
+      <span><button class="btn ghost sm" data-redit="${kind}:${i}">編輯</button><button class="btn ghost sm" data-rdel="${kind}:${i}">刪除</button></span></li>`;
+    $('#teachList').innerHTML = (S.teaching || []).map((t, i) => item(t, i, 'teaching')).join('') || '<li class="muted">尚未設定</li>';
+    $('#fixedLeaveList').innerHTML = (S.fixedLeaves || []).map((t, i) => item(t, i, 'fixedLeaves')).join('') || '<li class="muted">尚未設定</li>';
   }
-  function editTeaching(idx) {
+  const KIND = {
+    teaching: { name: '兼課', note: '例如：○○課', help: '該時段這個人有上班，就移到「機動待命」；當天輪休、差假或 21 點才起班則不排。★ 兼課時，值星由當時在隊代號最小的區隊長代理。' },
+    fixedLeaves: { name: '固定公假', note: '例如：○○會議、受訓', help: '符合的日子自動登錄為「公假」：那段時間從勤務格子拿掉，差假欄寫成「A(13-17)」，並算入合計。當天沒班（輪休），或公假時段和當天班別沒有重疊（例如 21 點才起班）就不套用。個別日子可在排班頁按「這天不套用」。' }
+  };
+  function editRecurring(kind, idx) {
     const S = state.settings;
-    const t = idx >= 0 ? JSON.parse(JSON.stringify(S.teaching[idx])) : { person: '1', weekday: 1, from: 10, to: 12, start: '', end: '', exclude: [], note: '' };
+    const K = KIND[kind];
+    S[kind] = S[kind] || [];
+    const t = idx >= 0 ? JSON.parse(JSON.stringify(S[kind][idx])) : { person: '1', weekday: 1, from: kind === 'teaching' ? 10 : 13, to: kind === 'teaching' ? 12 : 17, allDay: false, start: '', end: '', exclude: [], note: '' };
     if (!t.start && state.base && state.base.weeks.length) t.start = state.base.weeks[0].sunday;
     if (!t.end && state.base && state.base.weeks.length) t.end = E.addDays(state.base.weeks[state.base.weeks.length - 1].sunday, 6);
     const ex = () => (t.exclude || []).map((d, i) => `<span class="tag">${E.mdLabel(d)}<button data-exdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
-    openModal(`<h3>${idx >= 0 ? '編輯' : '新增'}兼課</h3>
+    openModal(`<h3>${idx >= 0 ? '編輯' : '新增'}${K.name}</h3>
       <div class="row2"><label class="fld">人員<select id="tP">${PERSON_ORDER.map(p => `<option value="${p}"${t.person === p ? ' selected' : ''}>${esc(personLabel(p))}</option>`).join('')}</select></label>
       <label class="fld">每週<select id="tW">${WD.map((w, i) => `<option value="${i}"${+t.weekday === i ? ' selected' : ''}>星期${w}</option>`).join('')}</select></label></div>
-      <div class="row2"><label class="fld">起<select id="tF">${hourOptions(t.from, 0, 23)}</select></label><label class="fld">迄<select id="tT">${hourOptions(t.to, 1, 24)}</select></label></div>
+      ${kind === 'fixedLeaves' ? `<label class="chk"><input type="checkbox" id="tAll"${t.allDay ? ' checked' : ''}> 全天</label>` : ''}
+      <div class="row2" id="tTime"><label class="fld">起<select id="tF">${hourOptions(t.from, 0, 23)}</select></label><label class="fld">迄<select id="tT">${hourOptions(t.to, 1, 24)}</select></label></div>
       <div class="row2"><label class="fld">開始日<input type="date" id="tS" value="${esc(t.start)}"></label><label class="fld">結束日<input type="date" id="tE" value="${esc(t.end)}"></label></div>
       <div class="fld">排除日期<div class="tags" id="tEx">${ex()}</div><div class="row2"><input type="date" id="tExIn"><button class="btn ghost sm" id="tExAdd">加入</button></div></div>
-      <label class="fld">備註（選填）<input id="tN" value="${esc(t.note || '')}" placeholder="例如：○○課"></label>
-      <p class="muted small">該時段這個人有上班，就移到「機動待命」；當天輪休、差假或 21 點才起班則不排。★ 兼課時，值星由當時在隊代號最小的區隊長代理。</p>
+      <label class="fld">備註（選填）<input id="tN" value="${esc(t.note || '')}" placeholder="${K.note}"></label>
+      <p class="muted small">${K.help}</p>
       <div class="btns"><button class="btn ghost" data-x="cancel">取消</button><button class="btn primary" data-x="ok">儲存</button></div>`, body => {
+      const all = body.querySelector('#tAll');
+      const syncAll = () => { body.querySelector('#tTime').hidden = !!(all && all.checked); };
+      if (all) all.onchange = syncAll; syncAll();
       const redrawEx = () => {
         body.querySelector('#tEx').innerHTML = ex();
         body.querySelectorAll('[data-exdel]').forEach(b => { b.onclick = () => { t.exclude.splice(+b.dataset.exdel, 1); redrawEx(); }; });
@@ -1939,19 +1979,19 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         t.exclude = t.exclude || [];
         if (!t.exclude.includes(v)) t.exclude.push(v);
         t.exclude.sort(); redrawEx();
-        if (E.weekdayOf(v) !== +body.querySelector('#tW').value) toast(`提醒：${E.mdLabel(v)} 是星期${WD[E.weekdayOf(v)]}，不是上課日。`, true);
+        if (E.weekdayOf(v) !== +body.querySelector('#tW').value) toast(`提醒：${E.mdLabel(v)} 是星期${WD[E.weekdayOf(v)]}，不是設定的星期。`, true);
       };
       body.querySelector('[data-x=cancel]').onclick = closeModal;
       body.querySelector('[data-x=ok]').onclick = () => {
         t.person = body.querySelector('#tP').value; t.weekday = +body.querySelector('#tW').value;
+        t.allDay = !!(all && all.checked);
         t.from = +body.querySelector('#tF').value; t.to = +body.querySelector('#tT').value;
         t.start = body.querySelector('#tS').value; t.end = body.querySelector('#tE').value;
         t.note = body.querySelector('#tN').value.trim();
-        if (t.to <= t.from) { toast('兼課的迄時要晚於起時。', true); return; }
+        if (!t.allDay && t.to <= t.from) { toast('迄時要晚於起時。', true); return; }
         if (t.start && t.end && t.end < t.start) { toast('結束日早於開始日。', true); return; }
-        S.teaching = S.teaching || [];
-        if (idx >= 0) S.teaching[idx] = t; else S.teaching.push(t);
-        save(); closeModal(); render(); toast('已儲存兼課設定');
+        if (idx >= 0) S[kind][idx] = t; else S[kind].push(t);
+        save(); closeModal(); render(); toast(`已儲存${K.name}設定`);
       };
     });
   }
@@ -1986,13 +2026,14 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modal').classList.contains('open')) closeModal(); });
     $('#viewRoster').addEventListener('click', e => {
-      const t = e.target.closest('[data-day],[data-cell],[data-shift],[data-delleave],#btnAddLeave,#btnClearDay,#btnClearWeek,#btnPrevWeek,#btnNextWeek,#btnGoSettings');
+      const t = e.target.closest('[data-day],[data-cell],[data-shift],[data-delleave],[data-skipfixed],#btnAddLeave,#btnClearDay,#btnClearWeek,#btnPrevWeek,#btnNextWeek,#btnGoSettings');
       if (t && t.id === 'btnGoSettings') { state.ui.view = 'settings'; save(); render(); window.scrollTo(0, 0); return; }
       if (!t) return;
       if (t.dataset.day !== undefined) { state.ui.day = +t.dataset.day; save(); render(); return; }
       if (t.dataset.cell) { editCell(t.dataset.cell); return; }
       if (t.dataset.shift) { editShift(t.dataset.shift); return; }
       const w = currentWeek(); const iso = w ? E.weekDays(w)[state.ui.day] : null;
+      if (t.dataset.skipfixed !== undefined) { const f = state.settings.fixedLeaves[+t.dataset.skipfixed]; f.exclude = f.exclude || []; if (!f.exclude.includes(iso)) f.exclude.push(iso); f.exclude.sort(); save(); render(); toast(`${E.mdLabel(iso)} 不套用 ${f.person} 的固定公假（可到設定移除排除）`); return; }
       if (t.dataset.delleave !== undefined) { const e2 = edit(iso); e2.leaves.splice(+t.dataset.delleave, 1); cleanupEdit(iso); save(); render(); return; }
       if (t.id === 'btnAddLeave') { addLeave(); return; }
       if (t.id === 'btnClearDay') { confirmBox(`清除 ${E.mdLabel(iso)} 的班別修改、差假與手動格子？`, '清除', () => { delete state.edits[iso]; save(); render(); }); return; }
@@ -2014,11 +2055,12 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       if (el.dataset.pi !== undefined) { state.settings.persons[+el.dataset.pi][el.dataset.pf] = el.value; save(); }
     });
     $('#viewSettings').addEventListener('click', e => {
-      const t = e.target.closest('[data-tedit],[data-tdel],#btnAddTeach,#btnBackup,#btnResetHeader,#btnWipe');
+      const t = e.target.closest('[data-redit],[data-rdel],#btnAddTeach,#btnAddFixedLeave,#btnBackup,#btnResetHeader,#btnWipe');
       if (!t) return;
-      if (t.dataset.tedit !== undefined) editTeaching(+t.dataset.tedit);
-      else if (t.dataset.tdel !== undefined) confirmBox('刪除這筆兼課設定？', '刪除', () => { state.settings.teaching.splice(+t.dataset.tdel, 1); save(); render(); });
-      else if (t.id === 'btnAddTeach') editTeaching(-1);
+      if (t.dataset.redit) { const [k, n] = t.dataset.redit.split(':'); editRecurring(k, +n); }
+      else if (t.dataset.rdel) { const [k, n] = t.dataset.rdel.split(':'); confirmBox(`刪除這筆${KIND[k].name}設定？`, '刪除', () => { state.settings[k].splice(+n, 1); save(); render(); }); }
+      else if (t.id === 'btnAddTeach') editRecurring('teaching', -1);
+      else if (t.id === 'btnAddFixedLeave') editRecurring('fixedLeaves', -1);
       else if (t.id === 'btnBackup') exportBackup();
       else if (t.id === 'btnResetHeader') confirmBox('把機關名稱、表名、主管、備註文字恢復成原本範本的內容？', '恢復', () => { const d = E.defaultSettings(); ['agency', 'title', 'supervisor', 'footer'].forEach(k => state.settings[k] = d[k]); save(); render(); });
       else if (t.id === 'btnWipe') confirmBox('清除這台裝置上的所有資料（設定、基準表、修改）？建議先匯出備份。', '全部清除', () => { try { localStorage.removeItem(STORE_KEY); } catch (e) { } state = { settings: E.defaultSettings(), base: null, edits: {}, ui: { week: null, day: 0, view: 'settings' } }; save(); render(); toast('已清除'); });
