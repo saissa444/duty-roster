@@ -189,6 +189,9 @@ br.m{display:none}
 .p1row select{flex:1;min-width:84px}
 .p1row .btn.sm{white-space:normal;text-align:left;line-height:1.25}
 @media (max-width:600px){.prow{grid-template-columns:32px 1fr 1fr}.prow .p1{grid-column:2 / 4}}
+.chip.wide{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;min-width:58px;line-height:1.1;padding:4px 8px}
+.chip.wide small{font-weight:400;font-size:11px;opacity:.85}
+.shiftbtn em.rule{color:var(--brand)}
 </style>
 </head>
 <body>
@@ -231,6 +234,12 @@ br.m{display:none}
     <div class="gridwrap" id="setPersons"></div>
   </section>
   <section class="card">
+    <h3>固定班別時段</h3>
+    <p class="muted small">某人某個星期固定上不同時段（例如每週五 08-19），在這裡設定，就不用每週手動改。</p>
+    <ul class="tlist" id="fixedShiftList"></ul>
+    <button class="btn ghost" id="btnAddFixedShift">＋ 新增固定班別時段</button>
+  </section>
+  <section class="card">
     <h3>兼課時段</h3>
     <p class="muted small">在設定的時段內，這個人如果有上班，就排到「機動待命」。</p>
     <ul class="tlist" id="teachList"></ul>
@@ -265,7 +274,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.5</p>
+  <p class="ver muted small">女二勤務表 v1.6</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -553,7 +562,8 @@ function defaultSettings() {
     footer: '＊因應落實職務代理制度，各級幹部因故未在隊或為編排勤務時，請依職務順位落實代理工作，以健全管理作為。\n＊勤務項目可照勤務實際狀況增減\n＊勤務變更請於頁後填記。並經主管核章。',
     teaching: [],
     fixedLeaves: [],
-    customLeaveTypes: ['事假', '病假', '家庭照顧假']
+    customLeaveTypes: ['事假', '病假', '家庭照顧假'],
+    fixedShifts: []
   };
 }
 
@@ -600,7 +610,13 @@ function baseShift(ctx, p, iso) {
       if (v === altStr) { s = def.alt.s; e = def.alt.e; }
     }
   } else return null;
-  return { code: cell.code || '', s, e, src: ov !== undefined ? 'edit' : 'base' };
+  let rule = null;
+  // 設定頁「固定班別時段」：只改基準表原本的班（排班頁個別修改、基準表已寫明時段者不改）
+  if (ov === undefined && !cell.custom && cell.code) {
+    const f = (ctx.settings.fixedShifts || []).find(x => x.person === p && (x.codes || []).includes(cell.code) && teachingOn(x, iso));
+    if (f) { s = +f.from; e = +f.to; if (e <= s) e += 24; rule = true; }
+  }
+  return { code: cell.code || '', s, e, src: ov !== undefined ? 'edit' : (rule ? 'rule' : 'base') };
 }
 
 function manualLeaves(ctx, iso) { return (dayEdit(ctx, iso).leaves || []); }
@@ -1786,9 +1802,10 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const rows = PERSON_ORDER.map(p => {
       const sh = r.shifts[p];
       const changed = ed.shifts && ed.shifts[p] !== undefined;
+      const ruled = sh && sh.src === 'rule';
       const star = w.star === p ? '<span class="star">★</span>' : '';
       return `<div class="srow${changed ? ' changed' : ''}"><div class="who">${star}<b>${p}</b><span>${esc(personName(p))}</span></div>
-        <button class="shiftbtn" data-shift="${p}">${esc(shiftText(sh))}${changed ? '<em>已修改</em>' : ''}</button></div>`;
+        <button class="shiftbtn" data-shift="${p}">${esc(shiftText(sh))}${changed ? '<em>已修改</em>' : ruled ? '<em class="rule">固定時段</em>' : ''}</button></div>`;
     }).join('');
     const lvTxt = l => `<b>${esc(l.p)}</b> ${esc(l.type)} ${l.s === undefined || l.s === null || l.s === '' ? '全天' : esc(E.rangeLabel(+l.s, +l.e))}`;
     const leaves = (ed.leaves || []).map((l, i) => `<li>${lvTxt(l)}<button class="x" data-delleave="${i}" aria-label="刪除">✕</button></li>`)
@@ -2000,10 +2017,11 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
           ${o2 ? `<button class="btn ghost sm" data-wd="${i}">${wdSummary(p) ? '另設：' + esc(wdSummary(p)) : '依星期另設'}</button>` : ''}</div></div>
       </div>`).join('')}</div>`;
     $('#setAgency').value = S.agency; $('#setTitle').value = S.title; $('#setSupervisor').value = S.supervisor; $('#setFooter').value = S.footer;
-    const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
+    const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${kind === 'fixedShifts' ? '・適用：' + (t.codes || []).map(c => c + ' 號班').join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
       <span><button class="btn ghost sm" data-redit="${kind}:${i}">編輯</button><button class="btn ghost sm" data-rdel="${kind}:${i}">刪除</button></span></li>`;
     $('#teachList').innerHTML = (S.teaching || []).map((t, i) => item(t, i, 'teaching')).join('') || '<li class="muted">尚未設定</li>';
     $('#customTypes').innerHTML = (S.customLeaveTypes || []).map((t, i) => `<span class="tag">${esc(t)}<button data-ctdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
+    $('#fixedShiftList').innerHTML = (S.fixedShifts || []).map((t, i) => item(t, i, 'fixedShifts')).join('') || '<li class="muted">尚未設定</li>';
     $('#fixedLeaveList').innerHTML = (S.fixedLeaves || []).map((t, i) => item(t, i, 'fixedLeaves')).join('') || '<li class="muted">尚未設定</li>';
   }
   function wdSummary(p) {
@@ -2034,6 +2052,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
   }
   const KIND = {
+    fixedShifts: { name: '固定班別時段', note: '例如：週五提早到班', help: '每週這天，這個人的班如果是勾選的班別，就把上下班時間改成這裡的時段（班別代號不變，值星等規則照舊）。當天沒班不會新增班。排班頁個別修改、或基準表格子已寫明時段（例如 5(5-17)）的，以那邊為準。' },
     teaching: { name: '兼課', note: '例如：○○課', help: '該時段這個人有上班，就移到「機動待命」；當天輪休、差假或 21 點才起班則不排。★ 兼課時，值星由當時在隊代號最小的區隊長代理。' },
     fixedLeaves: { name: '固定公假', note: '例如：○○會議、受訓', help: '符合的日子自動登錄為「公假」：那段時間從勤務格子拿掉，差假欄寫成「A(13-17)」，並算入合計。當天沒班（輪休），或公假時段和當天班別沒有重疊（例如 21 點才起班）就不套用。個別日子可在排班頁按「這天不套用」。' }
   };
@@ -2041,7 +2060,11 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const S = state.settings;
     const K = KIND[kind];
     S[kind] = S[kind] || [];
-    const t = idx >= 0 ? JSON.parse(JSON.stringify(S[kind][idx])) : { person: '1', weekday: 1, from: kind === 'teaching' ? 10 : 13, to: kind === 'teaching' ? 12 : 17, allDay: false, start: '', end: '', exclude: [], note: '' };
+    const allCodes = state.base ? Object.keys(state.base.codes) : ['1', '2', '3', '4', '5', '6', '7'];
+    const defCodes = allCodes.filter(c => { const d = state.base && state.base.codes[c]; return c !== '3' && c !== '6' && !(d && d.s >= 20); });
+    const t = idx >= 0 ? JSON.parse(JSON.stringify(S[kind][idx])) : kind === 'fixedShifts'
+      ? { person: '1', weekday: 5, from: 8, to: 19, codes: defCodes, start: '', end: '', exclude: [], note: '' }
+      : { person: '1', weekday: 1, from: kind === 'teaching' ? 10 : 13, to: kind === 'teaching' ? 12 : 17, allDay: false, start: '', end: '', exclude: [], note: '' };
     if (!t.start && state.base && state.base.weeks.length) t.start = state.base.weeks[0].sunday;
     if (!t.end && state.base && state.base.weeks.length) t.end = E.addDays(state.base.weeks[state.base.weeks.length - 1].sunday, 6);
     const ex = () => (t.exclude || []).map((d, i) => `<span class="tag">${E.mdLabel(d)}<button data-exdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
@@ -2049,7 +2072,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       <div class="row2"><label class="fld">人員<select id="tP">${PERSON_ORDER.map(p => `<option value="${p}"${t.person === p ? ' selected' : ''}>${esc(personLabel(p))}</option>`).join('')}</select></label>
       <label class="fld">每週<select id="tW">${WD.map((w, i) => `<option value="${i}"${+t.weekday === i ? ' selected' : ''}>星期${w}</option>`).join('')}</select></label></div>
       ${kind === 'fixedLeaves' ? `<label class="chk"><input type="checkbox" id="tAll"${t.allDay ? ' checked' : ''}> 全天</label>` : ''}
-      <div class="row2" id="tTime"><label class="fld">起<select id="tF">${hourOptions(t.from, 0, 23)}</select></label><label class="fld">迄<select id="tT">${hourOptions(t.to, 1, 24)}</select></label></div>
+      ${kind === 'fixedShifts' ? `<div class="fld">適用班別（基準表排這些班時才改時段）<div class="chips" id="tCodes">${allCodes.map(c => { const d = state.base && state.base.codes[c]; return `<button class="chip wide${(t.codes || []).includes(c) ? ' on' : ''}" data-code="${c}">${c}${d ? `<small>${E.rangeLabel(d.s, d.e > 24 ? d.e - 24 : d.e)}</small>` : ''}</button>`; }).join('')}</div></div>` : ''}
+      <div class="row2" id="tTime"><label class="fld">${kind === 'fixedShifts' ? '改成：起' : '起'}<select id="tF">${hourOptions(t.from, 0, 23)}</select></label><label class="fld">迄<select id="tT">${hourOptions(t.to, 1, 24)}</select></label></div>
       <div class="row2"><label class="fld">開始日<input type="date" id="tS" value="${esc(t.start)}"></label><label class="fld">結束日<input type="date" id="tE" value="${esc(t.end)}"></label></div>
       <div class="fld">排除日期<div class="tags" id="tEx">${ex()}</div><div class="row2"><input type="date" id="tExIn"><button class="btn ghost sm" id="tExAdd">加入</button></div></div>
       <label class="fld">備註（選填）<input id="tN" value="${esc(t.note || '')}" placeholder="${K.note}"></label>
@@ -2058,6 +2082,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       const all = body.querySelector('#tAll');
       const syncAll = () => { body.querySelector('#tTime').hidden = !!(all && all.checked); };
       if (all) all.onchange = syncAll; syncAll();
+      body.querySelectorAll('#tCodes .chip').forEach(ch => { ch.onclick = () => ch.classList.toggle('on'); });
       const redrawEx = () => {
         body.querySelector('#tEx').innerHTML = ex();
         body.querySelectorAll('[data-exdel]').forEach(b => { b.onclick = () => { t.exclude.splice(+b.dataset.exdel, 1); redrawEx(); }; });
@@ -2078,7 +2103,13 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         t.from = +body.querySelector('#tF').value; t.to = +body.querySelector('#tT').value;
         t.start = body.querySelector('#tS').value; t.end = body.querySelector('#tE').value;
         t.note = body.querySelector('#tN').value.trim();
-        if (!t.allDay && t.to <= t.from) { toast('迄時要晚於起時。', true); return; }
+        if (kind === 'fixedShifts') {
+          t.codes = Array.from(body.querySelectorAll('#tCodes .chip.on')).map(x => x.dataset.code);
+          if (!t.codes.length) { toast('請至少勾選一種適用班別。', true); return; }
+          if (t.to === t.from) { toast('起訖時間相同。', true); return; }
+          const dup = (S.fixedShifts || []).some((x, j) => j !== idx && x.person === t.person && +x.weekday === t.weekday && x.codes.some(c => t.codes.includes(c)));
+          if (dup) { toast('這個人同一個星期、同一種班別已經有設定，請先修改原本那筆。', true); return; }
+        } else if (!t.allDay && t.to <= t.from) { toast('迄時要晚於起時。', true); return; }
         if (t.start && t.end && t.end < t.start) { toast('結束日早於開始日。', true); return; }
         if (idx >= 0) S[kind][idx] = t; else S[kind].push(t);
         save(); closeModal(); render(); toast(`已儲存${K.name}設定`);
@@ -2150,7 +2181,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
     $('#viewSettings').addEventListener('click', e => {
       const wdb = e.target.closest('[data-wd]'); if (wdb) { editShift1Weekday(+wdb.dataset.wd); return; }
-      const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnBackup,#btnResetHeader,#btnWipe');
+      const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnAddFixedShift,#btnBackup,#btnResetHeader,#btnWipe');
       if (!t) return;
       if (t.dataset.ctdel !== undefined) { state.settings.customLeaveTypes.splice(+t.dataset.ctdel, 1); save(); render(); return; }
       if (t.id === 'btnAddCustomType') {
@@ -2165,6 +2196,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       else if (t.dataset.rdel) { const [k, n] = t.dataset.rdel.split(':'); confirmBox(`刪除這筆${KIND[k].name}設定？`, '刪除', () => { state.settings[k].splice(+n, 1); save(); render(); }); }
       else if (t.id === 'btnAddTeach') editRecurring('teaching', -1);
       else if (t.id === 'btnAddFixedLeave') editRecurring('fixedLeaves', -1);
+      else if (t.id === 'btnAddFixedShift') editRecurring('fixedShifts', -1);
       else if (t.id === 'btnBackup') exportBackup();
       else if (t.id === 'btnResetHeader') confirmBox('把機關名稱、表名、主管、備註文字恢復成原本範本的內容？', '恢復', () => { const d = E.defaultSettings(); ['agency', 'title', 'supervisor', 'footer'].forEach(k => state.settings[k] = d[k]); save(); render(); });
       else if (t.id === 'btnWipe') confirmBox('清除這台裝置上的所有資料（設定、基準表、修改）？建議先匯出備份。', '全部清除', () => { try { localStorage.removeItem(STORE_KEY); } catch (e) { } state = { settings: E.defaultSettings(), base: null, edits: {}, ui: { week: null, day: 0, view: 'settings' } }; save(); render(); toast('已清除'); });
