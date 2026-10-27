@@ -273,15 +273,15 @@ br.m{display:none}
     <h3>備份與還原</h3>
     <p class="muted small">資料只存在這台裝置的這個瀏覽器。iPhone 的主畫面 App 和 Safari 是分開存的；要換裝置或換瀏覽器，先在這裡匯出備份，再到另一邊匯入。</p>
     <div class="btns left">
-      <button class="btn ghost" id="btnBackupShare">分享備份（LINE 等）</button>
+      <button class="btn ghost" id="btnBackupShare">分享備份</button>
       <button class="btn ghost" id="btnBackup">下載備份檔</button>
       <label class="btn ghost filebtn">匯入備份<input type="file" id="fileBackup" accept=".json,application/json"></label>
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
-    <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome）。請按「下載備份檔」，再從 LINE 電腦版把檔案拖進聊天室傳送。</p>
-    <p class="muted small">從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
+    <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome），請按「下載備份檔」。</p>
+    <p class="muted small">用 LINE 傳備份：iPhone 先按「下載備份檔」，再到 LINE 聊天室點「＋」→「檔案」選取；電腦則用 LINE 電腦版把檔案拖進聊天室。從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">女二勤務表 v1.8</p>
+  <p class="ver muted small">女二勤務表 v1.9</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -1715,15 +1715,16 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const isPdf = /\.pdf$/i.test(name);
     const why = IN_APP
       ? '目前是在 LINE（或其他 App）的內建瀏覽器裡，無法分享檔案。請點右下角「⋯」→「使用 Safari 開啟」，在 Safari 裡再匯出一次。'
-      : '這個瀏覽器不支援直接分享檔案。請按「下載」存到「檔案」App，再從「檔案」App 分享到 LINE。';
+      : '這個瀏覽器不支援直接分享檔案，請按「下載」存到「檔案」App。';
     openModal(`<h3>檔案已產生</h3><p class="msg"><b>${esc(name)}</b><br><span class="muted small">${sizeText(blob.size)}</span></p>
-      ${ok ? '<p class="muted small">按「分享」後，在選單裡選 LINE（沒看到就把 App 列往右滑、點「更多」），或選「儲存到檔案」。</p>' : `<p class="warnbox">${why}</p>`}
+      ${ok ? '<p class="muted small">「分享」可以傳到郵件、AirDrop 或存到「檔案」。</p>' : `<p class="warnbox">${why}</p>`}
+      <p class="muted small">要傳到 LINE：按「下載」存到「檔案」後，在 LINE 聊天室點「＋」→「檔案」選取這個檔案。</p>
       <p class="small err" id="shareErr" hidden></p>
       <div class="btns">
         <button class="btn ghost" data-x="cancel">關閉</button>
         ${isPdf ? `<a class="btn ghost" href="${url}" target="_blank" rel="noopener">預覽</a>` : ''}
         <a class="btn ghost" href="${url}" download="${esc(name)}" data-x="dl">下載</a>
-        ${ok ? '<button class="btn primary" data-x="share">分享（LINE 等）</button>' : ''}
+        ${ok ? '<button class="btn primary" data-x="share">分享</button>' : ''}
       </div>`, body => {
       const done = () => { closeModal(); setTimeout(() => URL.revokeObjectURL(url), 60000); };
       body.querySelector('[data-x=cancel]').onclick = done;
