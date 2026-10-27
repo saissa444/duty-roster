@@ -195,6 +195,9 @@ br.m{display:none}
 .shiftbtn em.rule{color:var(--brand)}
 .err{color:var(--err)}
 .sheet .btns .btn{flex:0 0 auto}
+.chk.radio{flex-wrap:nowrap;align-items:flex-start;color:var(--ink)}
+.chk.radio input{flex:none;margin-top:2px}
+.chk.radio span{flex:1;min-width:0;font-size:14px;line-height:1.45}
 </style>
 </head>
 <body>
@@ -262,13 +265,17 @@ br.m{display:none}
     <button class="btn ghost" id="btnAddFixedLeave">＋ 新增固定公假</button>
   </section>
   <section class="card">
-    <h3>匯出檔名</h3>
+    <h3>匯出檔名與 PDF 格式</h3>
     <p class="muted small">檔名格式：起始日-結束月日＋中間文字＋（隊別）。日期依選擇的週次自動帶入。檔名不能用的符號（/ \ : * ? " &lt; &gt; |）會自動略過。</p>
     <div class="row2">
       <label class="fld">隊別（括號內）<input id="setFileTeam" maxlength="20" placeholder="例如：女2、441"></label>
       <label class="fld">中間文字<input id="setFileMiddle" maxlength="20" placeholder="例如：勤務表"></label>
     </div>
     <p class="muted small" id="filePreview"></p>
+    <div class="fld">PDF 格式
+      <label class="chk radio"><input type="radio" name="pdfMode" value="vector"><span><b>文字版（建議）</b>：文字可選取、搜尋，檔案小；字型由開啟的裝置提供（Windows 有標楷體就顯示標楷體）</span></label>
+      <label class="chk radio"><input type="radio" name="pdfMode" value="image"><span><b>圖片版</b>：每頁是一張圖，各裝置看起來完全一樣，但文字不能選取、檔案較大</span></label>
+    </div>
   </section>
   <section class="card">
     <h3>表頭與備註文字</h3>
@@ -290,7 +297,7 @@ br.m{display:none}
     <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome），請按「下載備份檔」。</p>
     <p class="muted small">用 LINE 傳備份：iPhone 先按「下載備份檔」，再到 LINE 聊天室點「＋」→「檔案」選取；電腦則用 LINE 電腦版把檔案拖進聊天室。從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">勤務表 v2.1</p>
+  <p class="ver muted small">勤務表 v2.2</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -581,7 +588,8 @@ function defaultSettings() {
     customLeaveTypes: ['事假', '病假', '家庭照顧假'],
     fixedShifts: [],
     fileTeam: '女2',
-    fileMiddle: '勤務表'
+    fileMiddle: '勤務表',
+    pdfMode: 'vector'
   };
 }
 
@@ -1339,7 +1347,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       const cy = y + lh[i] / 2;
       if (hh === 'distributed' && L.length) {
         const chars = [];
-        L.forEach(x => { g.font = x.css; Array.from(x.t).forEach(ch => chars.push({ ch, css: x.css, color: x.color, w: g.measureText(ch).width })); });
+        // 分散對齊：忽略原本用來拉開距離的空白，把其餘字平均分布在格子寬度內
+        L.forEach(x => { g.font = x.css; Array.from(x.t).forEach(ch => { if (/\s|\u3000/.test(ch)) return; chars.push({ ch, css: x.css, color: x.color, w: g.measureText(ch).width }); }); });
         const sum = chars.reduce((a, c) => a + c.w, 0);
         const gap = chars.length > 1 ? (rect.w - pad * 2 - sum) / (chars.length - 1) : 0;
         let x = chars.length > 1 ? rect.x + pad : rect.x + (rect.w - sum) / 2;
@@ -1354,7 +1363,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   }
   const BW = { thin: 0.75, hair: 0.5, dotted: 0.75, dashed: 0.75, medium: 1.5, mediumDashed: 1.5, thick: 2.25, double: 2 };
 
-  function renderSheet(g, sh, styles, area, cw, ch, dpiK) {
+  function renderSheet(g, sh, styles, area, cw, ch, dpiK, lineDpi) {
+    lineDpi = lineDpi || DPI;
     // area: {r1,c1,r2,c2}；cw/ch：畫布大小（px）
     const p = sh.page;
     const xs = [0], ys = [0];
@@ -1398,7 +1408,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       drawText(g, cell.runs, xf.font, R, xf.h, xf.v, xf.wrap, k, cell.num);
     });
     // 框線
-    const pxw = pt => Math.max(1, pt * DPI / 72);
+    const pxw = pt => lineDpi === 72 ? pt : Math.max(1, pt * lineDpi / 72);
     g.strokeStyle = '#000'; g.lineCap = 'square';
     Object.keys(sh.cells).forEach(key => {
       const [r, c] = key.split(',').map(Number); if (!inArea(r, c)) return;
@@ -1550,8 +1560,139 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
   }
 
+  /* ---------- 文字版 PDF：模擬 canvas 介面，輸出 PDF 向量指令 ---------- */
+  // Times-Roman 字寬（1/1000 em），ASCII 32–126
+  const TIMES_W = [250,333,408,500,500,833,778,180,333,333,500,564,250,333,250,278,500,500,500,500,500,500,500,500,500,500,278,278,564,564,564,444,921,722,667,667,722,611,556,722,722,333,389,722,611,889,722,722,556,722,667,556,611,722,722,944,722,722,611,333,278,333,469,500,333,444,500,444,500,444,333,500,500,278,278,500,278,778,500,500,500,500,333,389,278,500,500,722,500,500,444,480,200,480,541];
+  const FONT_KEYS = { K: 'DFKaiShu-SB-Estd-BF', M: 'PMingLiU' };
+  const num = v => { const t = (Math.round(v * 100) / 100).toFixed(2); return t.replace(/\.?0+$/, '') || '0'; };
+  function rgbOf(c) {
+    let h = String(c || '#000').trim();
+    if (h[0] !== '#') return '0 0 0';
+    h = h.slice(1); if (h.length === 3) h = h.split('').map(x => x + x).join('');
+    const v = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255);
+    return v.map(x => num(x)).join(' ');
+  }
+  class PdfCanvas {
+    constructor(W, H) { this.W = W; this.H = H; this.ops = []; this.fillStyle = '#000'; this.strokeStyle = '#000'; this.lineWidth = 1; this.lineCap = 'butt'; this.textBaseline = 'alphabetic'; this.font = '12px serif'; this.path = []; this.seen = new Set(); this.fonts = new Set(); }
+    _font() {
+      const m = /(italic )?(bold )?([\d.]+)px (.*)$/.exec(this.font) || [];
+      const fam = (m[4] || '').toLowerCase();
+      return { bold: !!m[2], size: +(m[3] || 12), kind: /times/.test(fam) ? 'T' : /mingliu|lisung|songti|stsong|lisong/.test(fam) ? 'M' : 'K' };
+    }
+    _charW(ch, kind) {
+      const c = ch.charCodeAt(0);
+      if (kind === 'T') return c >= 32 && c <= 126 ? TIMES_W[c - 32] / 1000 : 1;
+      if (c === 0x20) return 0.25;      // 半形空白（自行定位，不輸出字元）
+      if (c === 0x3000) return 1;       // 全形空白
+      return c < 0x80 ? 0.5 : 1;
+    }
+    measureText(t) {
+      const f = this._font(); let w = 0;
+      const kind = f.kind === 'T' && /[^\x20-\x7e]/.test(t) ? 'K' : f.kind;
+      for (const ch of t) w += this._charW(ch, kind);
+      return { width: w * f.size };
+    }
+    fillRect(x, y, w, h) { if (w <= 0 || h <= 0) return; this.ops.push(`${rgbOf(this.fillStyle)} rg ${num(x)} ${num(this.H - y - h)} ${num(w)} ${num(h)} re f`); }
+    strokeRect(x, y, w, h) { this.ops.push(`${rgbOf(this.strokeStyle)} RG ${num(this.lineWidth)} w ${num(x)} ${num(this.H - y - h)} ${num(w)} ${num(h)} re S`); }
+    beginPath() { this.path = []; }
+    moveTo(x, y) { this.path.push(`${num(x)} ${num(this.H - y)} m`); }
+    lineTo(x, y) { this.path.push(`${num(x)} ${num(this.H - y)} l`); }
+    rect(x, y, w, h) { this.path.push(`${num(x)} ${num(this.H - y - h)} ${num(w)} ${num(h)} re`); }
+    stroke() {
+      const key = this.path.join(' ') + '|' + num(this.lineWidth);
+      if (this.seen.has(key)) return; this.seen.add(key); // 相鄰格子的同一條框線只畫一次
+      this.ops.push(`${rgbOf(this.strokeStyle)} RG ${num(this.lineWidth)} w ${this.lineCap === 'square' ? 2 : 0} J ${this.path.join(' ')} S`);
+    }
+    clip() { this.ops.push(`${this.path.join(' ')} W n`); }
+    save() { this.ops.push('q'); }
+    restore() { this.ops.push('Q'); }
+    fillText(t, x, y) {
+      if (!t) return;
+      // 遇到空白就分段，各段自己定位（不同閱讀器的空白寬度不一，避免版面跑掉）
+      if (/[ \u3000]/.test(t)) {
+        const f0 = this._font();
+        const kind0 = f0.kind === 'T' && /[^\x20-\x7e]/.test(t) ? 'K' : f0.kind;
+        let seg = '', sx = x, cx = x;
+        for (const ch of t) {
+          const w = this._charW(ch, kind0) * f0.size;
+          if (ch === ' ' || ch === '\u3000') { if (seg) this._text(seg, sx, y); seg = ''; cx += w; sx = cx; }
+          else { seg += ch; cx += w; }
+        }
+        if (seg) this._text(seg, sx, y);
+        return;
+      }
+      this._text(t, x, y);
+    }
+    _text(t, x, y) {
+      const f = this._font();
+      let kind = f.kind;
+      if (kind === 'T' && /[^\x20-\x7e]/.test(t)) kind = 'K';
+      const fk = kind === 'T' ? (f.bold ? 'TB' : 'T') : kind;
+      this.fonts.add(fk);
+      const base = this.textBaseline === 'middle' ? y + f.size * (kind === 'T' ? 0.33 : 0.36) : y;
+      let str;
+      if (kind === 'T') str = '(' + t.replace(/[\\()]/g, m => '\\' + m) + ')';
+      else { let hx = ''; for (const ch of t) { const cp = ch.codePointAt(0); if (cp > 0xffff) { const v = cp - 0x10000; hx += ((0xd800 + (v >> 10)).toString(16).padStart(4, '0') + (0xdc00 + (v & 0x3ff)).toString(16).padStart(4, '0')); } else hx += cp.toString(16).padStart(4, '0'); } str = '<' + hx + '>'; }
+      const col = rgbOf(this.fillStyle);
+      const boldCJK = f.bold && kind !== 'T';
+      this.ops.push(`BT ${col} rg${boldCJK ? ` ${col} RG ${num(f.size * 0.035)} w 2 Tr` : ' 0 Tr'} /F${fk} ${num(f.size)} Tf 1 0 0 1 ${num(x)} ${num(this.H - base)} Tm ${str} Tj ET`);
+    }
+  }
+  async function deflate(bytes) {
+    if (typeof CompressionStream === 'undefined') return null;
+    try {
+      const cs = new CompressionStream('deflate');
+      const out = new Blob([bytes]).stream().pipeThrough(cs);
+      return new Uint8Array(await new Response(out).arrayBuffer());
+    } catch (e) { return null; }
+  }
+  async function buildVectorPdf(pages, title) {
+    const enc = new TextEncoder();
+    const chunks = []; let len = 0; const offs = [];
+    const push = d => { const b = typeof d === 'string' ? enc.encode(d) : d; chunks.push(b); len += b.length; };
+    push('%PDF-1.4\n');
+    push(new Uint8Array([37, 226, 227, 207, 211, 10]));
+    const obj = (id, parts) => { offs[id] = len; push(`${id} 0 obj\n`); parts.forEach(push); push('\nendobj\n'); };
+    // 物件：1 catalog、2 pages、3 info、4–13 字型、14 起每頁 page＋content
+    const F = { K: 4, M: 7, T: 10, TB: 11 };
+    const fontRes = `/FK ${F.K} 0 R /FM ${F.M} 0 R /FT ${F.T} 0 R /FTB ${F.TB} 0 R`;
+    const n = pages.length;
+    const kidsRef = pages.map((_, i) => `${14 + i * 2} 0 R`).join(' ');
+    obj(1, ['<< /Type /Catalog /Pages 2 0 R >>']);
+    obj(2, [`<< /Type /Pages /Kids [${kidsRef}] /Count ${n} >>`]);
+    const u16 = t => { let h = 'FEFF'; for (const ch of t) h += ch.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase(); return '<' + h + '>'; };
+    obj(3, [`<< /Title ${u16(title || '勤務表')} /Producer (duty-roster) >>`]);
+    [['K', 4], ['M', 7]].forEach(([k, id]) => {
+      const name = FONT_KEYS[k];
+      obj(id, [`<< /Type /Font /Subtype /Type0 /BaseFont /${name} /Encoding /UniCNS-UCS2-H /DescendantFonts [${id + 1} 0 R] >>`]);
+      obj(id + 1, [`<< /Type /Font /Subtype /CIDFontType0 /BaseFont /${name} /CIDSystemInfo << /Registry (Adobe) /Ordering (CNS1) /Supplement 0 >> /FontDescriptor ${id + 2} 0 R /DW 1000 /W [1 95 500] >>`]);
+      obj(id + 2, [`<< /Type /FontDescriptor /FontName /${name} /Flags ${k === 'K' ? 6 : 6} /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 93 >>`]);
+    });
+    obj(10, ['<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding /WinAnsiEncoding >>']);
+    obj(11, ['<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold /Encoding /WinAnsiEncoding >>']);
+    obj(12, ['<< >>']); obj(13, ['<< >>']); // 保留
+    for (let i = 0; i < n; i++) {
+      const p = pages[i];
+      const pid = 14 + i * 2, cid = pid + 1;
+      obj(pid, [`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${num(p.pw)} ${num(p.ph)}] /Resources << /Font << ${fontRes} >> /ProcSet [/PDF /Text] >> /Contents ${cid} 0 R >>`]);
+      const raw = enc.encode(p.ops.join('\n'));
+      const z = await deflate(raw);
+      if (z) obj(cid, [`<< /Length ${z.length} /Filter /FlateDecode >>\nstream\n`, z, '\nendstream']);
+      else obj(cid, [`<< /Length ${raw.length} >>\nstream\n`, raw, '\nendstream']);
+    }
+    const total = 14 + n * 2;
+    const xref = len;
+    let x = `xref\n0 ${total}\n0000000000 65535 f \n`;
+    for (let i = 1; i < total; i++) x += String(offs[i]).padStart(10, '0') + ' 00000 n \n';
+    push(x);
+    push(`trailer\n<< /Size ${total} /Root 1 0 R /Info 3 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    return new Blob(chunks, { type: 'application/pdf' });
+  }
+
   /* xlsxBlob：匯出的活頁簿；sheetIndexes：要輸出的工作表（0 起算），預設全部 */
-  async function workbookToPdf(xlsxBlob, sheetIndexes) {
+  async function workbookToPdf(xlsxBlob, sheetIndexes, opts) {
+    opts = opts || {};
+    const vector = opts.mode !== 'image';
     const zip = await JSZip.loadAsync(xlsxBlob);
     const styles = readStyles(parse(await zip.file('xl/styles.xml').async('string')));
     let shared = [];
@@ -1585,14 +1726,21 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       }
       const area = printArea(sh, styles, defs[i]);
       const land = sh.page.landscape;
-      const w = Math.round((land ? PAGE_H_IN : PAGE_W_IN) * DPI), h = Math.round((land ? PAGE_W_IN : PAGE_H_IN) * DPI);
-      cv.width = w; cv.height = h;
-      renderSheet(g, sh, styles, area, w, h, dpiK);
-      pages.push({ jpeg: await canvasJpeg(cv), w, h, pw: (land ? PAGE_H_IN : PAGE_W_IN) * 72, ph: (land ? PAGE_W_IN : PAGE_H_IN) * 72 });
+      const pw = (land ? PAGE_H_IN : PAGE_W_IN) * 72, ph = (land ? PAGE_W_IN : PAGE_H_IN) * 72;
+      if (vector) {
+        const pc = new PdfCanvas(pw, ph);
+        renderSheet(pc, sh, styles, area, pw, ph, 72 / 96, 72);
+        pages.push({ ops: pc.ops, pw, ph });
+      } else {
+        const w = Math.round((land ? PAGE_H_IN : PAGE_W_IN) * DPI), h = Math.round((land ? PAGE_W_IN : PAGE_H_IN) * DPI);
+        cv.width = w; cv.height = h;
+        renderSheet(g, sh, styles, area, w, h, dpiK);
+        pages.push({ jpeg: await canvasJpeg(cv), w, h, pw, ph });
+      }
       await new Promise(r => setTimeout(r, 0));
     }
     cv.width = cv.height = 1;
-    return buildPdf(pages);
+    return vector ? buildVectorPdf(pages, opts.title) : buildPdf(pages);
   }
 
   window.PDF_IO = { workbookToPdf };
@@ -1801,7 +1949,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       const xlsx = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, weekDaysValues(w), state.settings, { duplex: !!duplex });
       const name = E.fileNameFor(w, state.settings, { duplex: !!duplex });
       if (kind === 'pdf') {
-        const pdf = await window.PDF_IO.workbookToPdf(xlsx);
+        const pdf = await window.PDF_IO.workbookToPdf(xlsx, null, { mode: state.settings.pdfMode || 'vector', title: name.replace(/\.xlsx$/, '') });
         const pdfName = name.replace(/\.xlsx$/, '.pdf');
         await deliverFile(pdf, pdfName);
         toast('已產生 ' + pdfName);
@@ -2077,6 +2225,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         <div class="fld pf p1">1 號班<div class="p1row"><select data-pi="${i}" data-pf="shift1"><option${p.shift1 === o1 ? ' selected' : ''}>${o1}</option>${o2 ? `<option${p.shift1 === o2 ? ' selected' : ''}>${o2}</option>` : ''}</select>
           ${o2 ? `<button class="btn ghost sm" data-wd="${i}">${wdSummary(p) ? '另設：' + esc(wdSummary(p)) : '依星期另設'}</button>` : ''}</div></div>
       </div>`).join('')}</div>`;
+    Array.from(document.querySelectorAll('input[name=pdfMode]')).forEach(r => { r.checked = r.value === (S.pdfMode || 'vector'); });
     $('#setFileTeam').value = S.fileTeam === undefined ? '女2' : S.fileTeam; $('#setFileMiddle').value = S.fileMiddle === undefined ? '勤務表' : S.fileMiddle;
     updateFilePreview();
     $('#setAgency').value = S.agency; $('#setTitle').value = S.title; $('#setSupervisor').value = S.supervisor; $('#setFooter').value = S.footer;
@@ -2241,6 +2390,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
     $('#viewSettings').addEventListener('change', e => {
       const el = e.target;
+      if (el.name === 'pdfMode') { state.settings.pdfMode = el.value; save(); toast(el.value === 'vector' ? 'PDF 改為文字版' : 'PDF 改為圖片版'); return; }
       if (el.dataset.pi !== undefined) {
         const per = state.settings.persons[+el.dataset.pi]; per[el.dataset.pf] = el.value;
         if (el.dataset.pf === 'shift1' && per.shift1ByWeekday) Object.keys(per.shift1ByWeekday).forEach(k => { if (per.shift1ByWeekday[k] === el.value) delete per.shift1ByWeekday[k]; });
