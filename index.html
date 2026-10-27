@@ -115,7 +115,7 @@ table.grid.leave th{width:64px}
 table.grid.leave td{text-align:left;padding-left:8px;white-space:normal}
 pre.footer{white-space:pre-wrap;font:inherit;font-size:12.5px;color:var(--muted);margin:0;background:var(--line2);padding:8px 10px;border-radius:8px}
 .ptable{border-collapse:collapse;width:100%;table-layout:fixed}
-.ptable th:nth-child(1){width:40px}.ptable th:nth-child(4){width:92px}
+.ptable th:nth-child(1){width:40px}.ptable th:nth-child(4){width:104px}
 .ptable th,.ptable td{padding:4px;border-bottom:1px solid var(--line2);text-align:left;font-size:14px}
 .ptable input{width:100%}
 .ptable td:first-child{width:44px;text-align:center}
@@ -175,6 +175,20 @@ br.m{display:none}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .btn.primary.alt{background:#6fbf98;border-color:#6fbf98}}
 .badge{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;background:var(--accent);color:var(--brand);margin-left:2px}
 .leaves li .btn.sm{margin-left:auto}
+.link.sm{font-size:12px;padding:2px 0;text-align:left;display:block;line-height:1.3}
+.wdlist{display:flex;flex-direction:column;gap:6px;margin:6px 0 10px}
+.wdrow{display:flex;align-items:center;gap:10px}
+.wdrow span{width:56px;flex:none}
+.wdrow select{flex:1}
+.ptable td{vertical-align:top}
+.plist{display:flex;flex-direction:column;gap:8px}
+.prow{display:grid;grid-template-columns:32px 1fr 1fr 1.3fr;gap:8px;align-items:end;padding:8px 0;border-bottom:1px solid var(--line2)}
+.pcode{display:inline-flex;width:28px;height:28px;border-radius:7px;background:var(--chip);align-items:center;justify-content:center;align-self:center}
+.prow .fld{margin:0}
+.p1row{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.p1row select{flex:1;min-width:84px}
+.p1row .btn.sm{white-space:normal;text-align:left;line-height:1.25}
+@media (max-width:600px){.prow{grid-template-columns:32px 1fr 1fr}.prow .p1{grid-column:2 / 4}}
 </style>
 </head>
 <body>
@@ -213,7 +227,7 @@ br.m{display:none}
 <main id="viewSettings" hidden>
   <section class="card">
     <h3>姓名代碼對照表</h3>
-    <p class="muted small">會寫進每張日表右上角的「服勤人員姓名代碼對照表」。「1 號班」是這個人預設的 1 號班時段，個別日子可在排班頁再改。</p>
+    <p class="muted small">會寫進每張日表右上角的「服勤人員姓名代碼對照表」。「1 號班」是這個人預設的 1 號班時段；某幾個星期不同，按下方「依星期另設」（例如平常 08-17、週四 09-18）。個別日子可在排班頁再改。</p>
     <div class="gridwrap" id="setPersons"></div>
   </section>
   <section class="card">
@@ -251,7 +265,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.4</p>
+  <p class="ver muted small">女二勤務表 v1.5</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -579,7 +593,9 @@ function baseShift(ctx, p, iso) {
   else if (def) {
     s = def.s; e = def.e;
     if (cell.code === '1' && def.alt) {
-      const v = cell.variant || personSetting(ctx.settings, p).shift1;
+      const ps = personSetting(ctx.settings, p);
+      const byWd = ps.shift1ByWeekday || {};
+      const v = cell.variant || byWd[weekdayOf(iso)] || ps.shift1;
       const altStr = rangeLabel(def.alt.s, def.alt.e);
       if (v === altStr) { s = def.alt.s; e = def.alt.e; }
     }
@@ -1976,15 +1992,46 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const codes = state.base ? state.base.codes : null;
     const d1 = codes && codes['1'] ? codes['1'] : { s: 9, e: 18, alt: { s: 8, e: 17 } };
     const o1 = E.rangeLabel(d1.s, d1.e), o2 = d1.alt ? E.rangeLabel(d1.alt.s, d1.alt.e) : null;
-    $('#setPersons').innerHTML = `<table class="ptable"><thead><tr><th>代號</th><th>職別</th><th>姓名</th><th>1 號班</th></tr></thead><tbody>${S.persons.map((p, i) => `
-      <tr><td><b>${esc(p.code)}</b></td><td><input data-pi="${i}" data-pf="title" value="${esc(p.title)}"></td><td><input data-pi="${i}" data-pf="name" value="${esc(p.name)}"></td>
-      <td><select data-pi="${i}" data-pf="shift1"><option${p.shift1 === o1 ? ' selected' : ''}>${o1}</option>${o2 ? `<option${p.shift1 === o2 ? ' selected' : ''}>${o2}</option>` : ''}</select></td></tr>`).join('')}</tbody></table>`;
+    $('#setPersons').innerHTML = `<div class="plist">${S.persons.map((p, i) => `
+      <div class="prow"><b class="pcode">${esc(p.code)}</b>
+        <label class="fld pf">職別<input data-pi="${i}" data-pf="title" value="${esc(p.title)}"></label>
+        <label class="fld pf">姓名<input data-pi="${i}" data-pf="name" value="${esc(p.name)}"></label>
+        <div class="fld pf p1">1 號班<div class="p1row"><select data-pi="${i}" data-pf="shift1"><option${p.shift1 === o1 ? ' selected' : ''}>${o1}</option>${o2 ? `<option${p.shift1 === o2 ? ' selected' : ''}>${o2}</option>` : ''}</select>
+          ${o2 ? `<button class="btn ghost sm" data-wd="${i}">${wdSummary(p) ? '另設：' + esc(wdSummary(p)) : '依星期另設'}</button>` : ''}</div></div>
+      </div>`).join('')}</div>`;
     $('#setAgency').value = S.agency; $('#setTitle').value = S.title; $('#setSupervisor').value = S.supervisor; $('#setFooter').value = S.footer;
     const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
       <span><button class="btn ghost sm" data-redit="${kind}:${i}">編輯</button><button class="btn ghost sm" data-rdel="${kind}:${i}">刪除</button></span></li>`;
     $('#teachList').innerHTML = (S.teaching || []).map((t, i) => item(t, i, 'teaching')).join('') || '<li class="muted">尚未設定</li>';
     $('#customTypes').innerHTML = (S.customLeaveTypes || []).map((t, i) => `<span class="tag">${esc(t)}<button data-ctdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
     $('#fixedLeaveList').innerHTML = (S.fixedLeaves || []).map((t, i) => item(t, i, 'fixedLeaves')).join('') || '<li class="muted">尚未設定</li>';
+  }
+  function wdSummary(p) {
+    const m = p.shift1ByWeekday || {};
+    const ks = Object.keys(m).filter(k => m[k] && m[k] !== p.shift1).sort();
+    return ks.length ? ks.map(k => `週${WD[+k]} ${m[k]}`).join('、') : '';
+  }
+  function editShift1Weekday(i) {
+    const p = state.settings.persons[i];
+    const codes = state.base ? state.base.codes : null;
+    const d1 = codes && codes['1'] ? codes['1'] : { s: 9, e: 18, alt: { s: 8, e: 17 } };
+    const o1 = E.rangeLabel(d1.s, d1.e), o2 = d1.alt ? E.rangeLabel(d1.alt.s, d1.alt.e) : null;
+    const m = Object.assign({}, p.shift1ByWeekday || {});
+    const rows = [1, 2, 3, 4, 5, 6, 0].map(wd => `<div class="wdrow"><span>星期${WD[wd]}</span><select data-wdsel="${wd}">
+      <option value="">同預設（${esc(p.shift1)}）</option>
+      ${[o1, o2].filter(Boolean).filter(o => o !== p.shift1).map(o => `<option${m[wd] === o ? ' selected' : ''}>${o}</option>`).join('')}</select></div>`).join('');
+    openModal(`<h3>${esc(personLabel(p.code))} 的 1 號班</h3>
+      <p class="muted small">預設是 ${esc(p.shift1)}。只有某幾天不同時，在那天選另一個時段，例如「週四 09-18」。排班頁個別日子再修改的，以排班頁為準。</p>
+      <div class="wdlist">${rows}</div>
+      <div class="btns"><button class="btn ghost" data-x="cancel">取消</button><button class="btn primary" data-x="ok">儲存</button></div>`, body => {
+      body.querySelector('[data-x=cancel]').onclick = closeModal;
+      body.querySelector('[data-x=ok]').onclick = () => {
+        const out = {};
+        body.querySelectorAll('[data-wdsel]').forEach(sel => { if (sel.value) out[sel.dataset.wdsel] = sel.value; });
+        p.shift1ByWeekday = out;
+        save(); closeModal(); render(); toast('已儲存');
+      };
+    });
   }
   const KIND = {
     teaching: { name: '兼課', note: '例如：○○課', help: '該時段這個人有上班，就移到「機動待命」；當天輪休、差假或 21 點才起班則不排。★ 兼課時，值星由當時在隊代號最小的區隊長代理。' },
@@ -2095,9 +2142,14 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
     $('#viewSettings').addEventListener('change', e => {
       const el = e.target;
-      if (el.dataset.pi !== undefined) { state.settings.persons[+el.dataset.pi][el.dataset.pf] = el.value; save(); }
+      if (el.dataset.pi !== undefined) {
+        const per = state.settings.persons[+el.dataset.pi]; per[el.dataset.pf] = el.value;
+        if (el.dataset.pf === 'shift1' && per.shift1ByWeekday) Object.keys(per.shift1ByWeekday).forEach(k => { if (per.shift1ByWeekday[k] === el.value) delete per.shift1ByWeekday[k]; });
+        save(); if (el.dataset.pf === 'shift1') renderSettings();
+      }
     });
     $('#viewSettings').addEventListener('click', e => {
+      const wdb = e.target.closest('[data-wd]'); if (wdb) { editShift1Weekday(+wdb.dataset.wd); return; }
       const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnBackup,#btnResetHeader,#btnWipe');
       if (!t) return;
       if (t.dataset.ctdel !== undefined) { state.settings.customLeaveTypes.splice(+t.dataset.ctdel, 1); save(); render(); return; }
