@@ -262,6 +262,15 @@ br.m{display:none}
     <button class="btn ghost" id="btnAddFixedLeave">＋ 新增固定公假</button>
   </section>
   <section class="card">
+    <h3>匯出檔名</h3>
+    <p class="muted small">檔名格式：起始日-結束月日＋中間文字＋（隊別）。日期依選擇的週次自動帶入。檔名不能用的符號（/ \ : * ? " &lt; &gt; |）會自動略過。</p>
+    <div class="row2">
+      <label class="fld">隊別（括號內）<input id="setFileTeam" maxlength="20" placeholder="例如：女2、441"></label>
+      <label class="fld">中間文字<input id="setFileMiddle" maxlength="20" placeholder="例如：勤務表"></label>
+    </div>
+    <p class="muted small" id="filePreview"></p>
+  </section>
+  <section class="card">
     <h3>表頭與備註文字</h3>
     <label class="fld">機關名稱（左上）<textarea id="setAgency" rows="2"></textarea></label>
     <label class="fld">表名<input id="setTitle"></label>
@@ -281,7 +290,7 @@ br.m{display:none}
     <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome），請按「下載備份檔」。</p>
     <p class="muted small">用 LINE 傳備份：iPhone 先按「下載備份檔」，再到 LINE 聊天室點「＋」→「檔案」選取；電腦則用 LINE 電腦版把檔案拖進聊天室。從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">勤務表 v2.0</p>
+  <p class="ver muted small">勤務表 v2.1</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -570,7 +579,9 @@ function defaultSettings() {
     teaching: [],
     fixedLeaves: [],
     customLeaveTypes: ['事假', '病假', '家庭照顧假'],
-    fixedShifts: []
+    fixedShifts: [],
+    fileTeam: '女2',
+    fileMiddle: '勤務表'
   };
 }
 
@@ -871,10 +882,18 @@ function mergeInfo(lines) {
 
 function weekDays(week) { return [0, 1, 2, 3, 4, 5, 6].map(i => addDays(week.sunday, i)); }
 
-function fileNameFor(week) {
+/* 檔名：起始日（民國年月日）-結束月日＋中間文字＋（隊別），例如 1151101-1107（女2） */
+function cleanFilePart(t) { return String(t || '').replace(/[\\/:*?"<>|\r\n\t]/g, '').trim(); }
+function fileBaseFor(week, S) {
+  S = S || {};
   const a = rocParts(week.sunday), b = rocParts(addDays(week.sunday, 6));
-  const tail = a.m === b.m ? pad2(b.d) : pad2(b.m) + pad2(b.d);
-  return `${a.y}${pad2(a.m)}${pad2(a.d)}-${tail}勤務表女2.xlsx`;
+  const team = cleanFilePart(S.fileTeam === undefined ? '女2' : S.fileTeam);
+  const mid = cleanFilePart(S.fileMiddle === undefined ? '勤務表' : S.fileMiddle);
+  return `${a.y}${pad2(a.m)}${pad2(a.d)}-${pad2(b.m)}${pad2(b.d)}${mid}${team ? '（' + team + '）' : ''}`;
+}
+function fileNameFor(week, S, opts) {
+  opts = opts || {};
+  return fileBaseFor(week, S) + (opts.ext || '.xlsx');
 }
 function sheetNameFor(iso) { const r = rocParts(iso); return pad2(r.m) + pad2(r.d); }
 
@@ -1780,7 +1799,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     busy = true; EXPORT_BTNS.forEach(b => { $(b).disabled = true; }); btn.textContent = '產生中…';
     try {
       const xlsx = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, weekDaysValues(w), state.settings, { duplex: !!duplex });
-      const name = duplex ? E.fileNameFor(w).replace(/\.xlsx$/, '_送核版.xlsx') : E.fileNameFor(w);
+      const name = E.fileNameFor(w, state.settings, { duplex: !!duplex });
       if (kind === 'pdf') {
         const pdf = await window.PDF_IO.workbookToPdf(xlsx);
         const pdfName = name.replace(/\.xlsx$/, '.pdf');
@@ -2058,6 +2077,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         <div class="fld pf p1">1 號班<div class="p1row"><select data-pi="${i}" data-pf="shift1"><option${p.shift1 === o1 ? ' selected' : ''}>${o1}</option>${o2 ? `<option${p.shift1 === o2 ? ' selected' : ''}>${o2}</option>` : ''}</select>
           ${o2 ? `<button class="btn ghost sm" data-wd="${i}">${wdSummary(p) ? '另設：' + esc(wdSummary(p)) : '依星期另設'}</button>` : ''}</div></div>
       </div>`).join('')}</div>`;
+    $('#setFileTeam').value = S.fileTeam === undefined ? '女2' : S.fileTeam; $('#setFileMiddle').value = S.fileMiddle === undefined ? '勤務表' : S.fileMiddle;
+    updateFilePreview();
     $('#setAgency').value = S.agency; $('#setTitle').value = S.title; $('#setSupervisor').value = S.supervisor; $('#setFooter').value = S.footer;
     const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${kind === 'fixedShifts' ? '・適用：' + (t.codes || []).map(c => c + ' 號班').join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
       <span><button class="btn ghost sm" data-redit="${kind}:${i}">編輯</button><button class="btn ghost sm" data-rdel="${kind}:${i}">刪除</button></span></li>`;
@@ -2065,6 +2086,11 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     $('#customTypes').innerHTML = (S.customLeaveTypes || []).map((t, i) => `<span class="tag">${esc(t)}<button data-ctdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
     $('#fixedShiftList').innerHTML = (S.fixedShifts || []).map((t, i) => item(t, i, 'fixedShifts')).join('') || '<li class="muted">尚未設定</li>';
     $('#fixedLeaveList').innerHTML = (S.fixedLeaves || []).map((t, i) => item(t, i, 'fixedLeaves')).join('') || '<li class="muted">尚未設定</li>';
+  }
+  function updateFilePreview() {
+    const w = state.base && state.base.weeks.length ? (currentWeek() || state.base.weeks[0]) : { sunday: '2026-11-01' };
+    const el = $('#filePreview'); if (!el) return;
+    el.innerHTML = `檔名預覽：<b>${esc(E.fileNameFor(w, state.settings))}</b>、<b>${esc(E.fileNameFor(w, state.settings, { ext: '.pdf' }))}</b>（一般版與送核版同名）`;
   }
   function wdSummary(p) {
     const m = p.shift1ByWeekday || {};
@@ -2210,8 +2236,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     $('#viewSettings').addEventListener('input', e => {
       const el = e.target; const S = state.settings;
       if (el.dataset.pi !== undefined) { S.persons[+el.dataset.pi][el.dataset.pf] = el.value; save(); return; }
-      const map = { setAgency: 'agency', setTitle: 'title', setSupervisor: 'supervisor', setFooter: 'footer' };
-      if (map[el.id]) { S[map[el.id]] = el.value; save(); }
+      const map = { setAgency: 'agency', setTitle: 'title', setSupervisor: 'supervisor', setFooter: 'footer', setFileTeam: 'fileTeam', setFileMiddle: 'fileMiddle' };
+      if (map[el.id]) { S[map[el.id]] = el.value; save(); if (el.id === 'setFileTeam' || el.id === 'setFileMiddle') updateFilePreview(); }
     });
     $('#viewSettings').addEventListener('change', e => {
       const el = e.target;
