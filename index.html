@@ -193,6 +193,8 @@ br.m{display:none}
 .chip.wide{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;min-width:58px;line-height:1.1;padding:4px 8px}
 .chip.wide small{font-weight:400;font-size:11px;opacity:.85}
 .shiftbtn em.rule{color:var(--brand)}
+.err{color:var(--err)}
+.sheet .btns .btn{flex:0 0 auto}
 </style>
 </head>
 <body>
@@ -200,6 +202,7 @@ br.m{display:none}
   <h1>女二勤務表</h1>
   <button class="btn ghost" id="btnSettings">設定</button>
 </header>
+<p class="banner" id="inAppWarn" hidden>目前是在 LINE 等 App 的內建瀏覽器，匯出的檔案無法分享或儲存。請點右下角「⋯」→「使用 Safari 開啟」。</p>
 <p class="banner" id="storageWarn" hidden>這個瀏覽器目前無法保存資料（可能是私密瀏覽），關閉頁面後修改會消失。</p>
 
 <main id="viewRoster">
@@ -278,7 +281,7 @@ br.m{display:none}
     <p class="muted small" id="shareNote" hidden>這個瀏覽器不支援直接分享檔案（例如 Mac 的 Chrome）。請按「下載備份檔」，再從 LINE 電腦版把檔案拖進聊天室傳送。</p>
     <p class="muted small">從 LINE 收到備份檔：iPhone 點開檔案 → 分享 →「儲存到檔案」，再回來按「匯入備份」選這個檔；電腦則先存到電腦，再按「匯入備份」。備份檔含姓名與排班資料，請只傳給需要的人。</p>
   </section>
-  <p class="ver muted small">女二勤務表 v1.7</p>
+  <p class="ver muted small">女二勤務表 v1.8</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -1697,31 +1700,61 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   function canShareFiles() {
     try { return !!(navigator.canShare && navigator.share && navigator.canShare({ files: [new File(['x'], 'a.json', { type: 'application/json' })] })); } catch (e) { return false; }
   }
-  // mode：預設＝iPhone 分享、電腦下載；'share'＝一律開分享選單；'download'＝一律下載
-  async function deliverFile(blob, name, mode) {
-    if ((mode === 'share' || (mode !== 'download' && isIOS)) && navigator.canShare) {
-      try {
-        const f = new File([blob], name, { type: blob.type });
-        if (navigator.canShare({ files: [f] })) {
-          try { await navigator.share({ files: [f] }); return; }
-          catch (e) {
-            if (e && e.name === 'AbortError') return;
-            // 產生檔案花了時間，iOS 可能不允許直接開分享選單：改由使用者再點一次
-            const url = URL.createObjectURL(blob);
-            openModal(`<h3>檔案已產生</h3><p class="msg">${esc(name)}</p><p class="muted small">點「分享／儲存」後，可選「儲存到檔案」或用 LINE、Mail 傳送。</p>
-              <div class="btns"><a class="btn ghost" href="${url}" download="${esc(name)}">下載</a><button class="btn ghost" data-x="cancel">關閉</button><button class="btn primary" data-x="ok">分享／儲存</button></div>`, body => {
-              body.querySelector('[data-x=cancel]').onclick = closeModal;
-              body.querySelector('[data-x=ok]').onclick = () => { navigator.share({ files: [f] }).then(closeModal).catch(err => { if (!err || err.name !== 'AbortError') toast('無法開啟分享選單，請改按「下載」。', true); }); };
-            });
-            return;
-          }
-        }
-      } catch (e) { /* 改用一般下載 */ }
-    }
-    const url = URL.createObjectURL(blob);
+  const IN_APP = /\bLine\/|FBAN|FBAV|Instagram|MicroMessenger/i.test(navigator.userAgent);
+  function sizeText(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+  function anchorDownload(url, name) {
     const a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+  /* 檔案產生後的「交付」視窗：分享鍵由使用者重新點一次，iPhone 才一定允許開分享選單 */
+  function resultModal(blob, name) {
+    const f = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+    let ok = false;
+    try { ok = !!(navigator.share && navigator.canShare && navigator.canShare({ files: [f] })); } catch (e) { ok = false; }
+    const url = URL.createObjectURL(blob);
+    const isPdf = /\.pdf$/i.test(name);
+    const why = IN_APP
+      ? '目前是在 LINE（或其他 App）的內建瀏覽器裡，無法分享檔案。請點右下角「⋯」→「使用 Safari 開啟」，在 Safari 裡再匯出一次。'
+      : '這個瀏覽器不支援直接分享檔案。請按「下載」存到「檔案」App，再從「檔案」App 分享到 LINE。';
+    openModal(`<h3>檔案已產生</h3><p class="msg"><b>${esc(name)}</b><br><span class="muted small">${sizeText(blob.size)}</span></p>
+      ${ok ? '<p class="muted small">按「分享」後，在選單裡選 LINE（沒看到就把 App 列往右滑、點「更多」），或選「儲存到檔案」。</p>' : `<p class="warnbox">${why}</p>`}
+      <p class="small err" id="shareErr" hidden></p>
+      <div class="btns">
+        <button class="btn ghost" data-x="cancel">關閉</button>
+        ${isPdf ? `<a class="btn ghost" href="${url}" target="_blank" rel="noopener">預覽</a>` : ''}
+        <a class="btn ghost" href="${url}" download="${esc(name)}" data-x="dl">下載</a>
+        ${ok ? '<button class="btn primary" data-x="share">分享（LINE 等）</button>' : ''}
+      </div>`, body => {
+      const done = () => { closeModal(); setTimeout(() => URL.revokeObjectURL(url), 60000); };
+      body.querySelector('[data-x=cancel]').onclick = done;
+      const sb = body.querySelector('[data-x=share]');
+      if (sb) sb.onclick = () => {
+        // 不可在這之前 await 任何東西：要保持「使用者剛點擊」的狀態
+        navigator.share({ files: [f] }).then(done).catch(err => {
+          if (err && err.name === 'AbortError') return; // 使用者自己關掉選單
+          const el = body.querySelector('#shareErr');
+          el.hidden = false;
+          el.textContent = `無法開啟分享選單（${err && err.name ? err.name : '錯誤'}${err && err.message ? '：' + err.message : ''}）。請改按「下載」，再從「檔案」App 分享。`;
+        });
+      };
+    });
+  }
+  // mode：'download'＝直接下載；'share'＝需要分享；未指定＝iPhone／iPad 開交付視窗、電腦直接下載
+  async function deliverFile(blob, name, mode) {
+    if (mode === 'download' || (!mode && !isIOS)) {
+      const url = URL.createObjectURL(blob);
+      anchorDownload(url, name);
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      return;
+    }
+    if (mode === 'share' && navigator.share && navigator.canShare) {
+      // 備份檔很小、立刻產生：先直接叫出分享選單，失敗才開視窗
+      try {
+        const f = new File([blob], name, { type: blob.type });
+        if (navigator.canShare({ files: [f] })) { await navigator.share({ files: [f] }); return; }
+      } catch (e) { if (e && e.name === 'AbortError') return; }
+    }
+    resultModal(blob, name);
   }
   function weekDaysValues(w) {
     const c = ctx();
@@ -2214,6 +2247,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
   }
 
   load(); bind(); render();
+  if (IN_APP) { const b = $('#inAppWarn'); if (b) b.hidden = false; }
   if (!canShareFiles()) { const b = $('#btnBackupShare'); if (b) b.hidden = true; const n = $('#shareNote'); if (n) n.hidden = false; }
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) {
     navigator.serviceWorker.register('sw.js').catch(() => { });
