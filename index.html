@@ -169,6 +169,10 @@ br.m{display:none}
 
 .exportrow{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .exportrow .btn{width:100%;padding:9px 6px}
+.exlabel{margin:10px 0 6px;font-weight:600;font-size:14px}
+.exlabel small{font-weight:400;color:var(--muted);margin-left:6px;font-size:12.5px}
+.btn.primary.alt{background:#2f6b4f;border-color:#2f6b4f}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .btn.primary.alt{background:#6fbf98;border-color:#6fbf98}}
 </style>
 </head>
 <body>
@@ -194,7 +198,10 @@ br.m{display:none}
         <button class="btn ghost sq" id="btnNextWeek" aria-label="下一週">›</button>
       </div>
       <div class="weekinfo" id="weekInfo"></div>
+      <p class="exlabel">一般版<small>7 張勤務分配表＋1 張勤務變更表</small></p>
       <div class="exportrow"><button class="btn primary" id="btnExport">匯出本週 Excel</button><button class="btn primary" id="btnExportPdf">匯出本週班表 PDF</button></div>
+      <p class="exlabel">送核版<small>雙面列印：正面勤務分配表、背面勤務變更表，共 14 頁</small></p>
+      <div class="exportrow"><button class="btn primary alt" id="btnDuplexXlsx">送核版匯出 Excel</button><button class="btn primary alt" id="btnDuplexPdf">送核版匯出 PDF</button></div>
     </section>
     <nav class="daytabs" id="dayTabs"></nav>
     <div id="dayPanel"></div>
@@ -230,7 +237,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.1</p>
+  <p class="ver muted small">女二勤務表 v1.2</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -909,7 +916,8 @@ function newGuid(i) {
 }
 
 /* days: [{iso, sheetName, values:{addr:value}}]（7 天），settings：名字表等 */
-async function buildWorkbook(templateB64, days, settings) {
+async function buildWorkbook(templateB64, days, settings, opts) {
+  opts = opts || {};
   const zip = await JSZip.loadAsync(b64ToBytes(templateB64));
   const master = await zip.file('xl/worksheets/sheet2.xml').async('string');
   const ser = new XMLSerializer();
@@ -950,28 +958,101 @@ async function buildWorkbook(templateB64, days, settings) {
     ig.appendChild(ie);
     zip.file(`xl/worksheets/sheet${i + 1}.xml`, toXml(ser, doc));
   }
-  // 勤務變更表：取消選取，避免群組
-  const s8 = zip.file('xl/worksheets/sheet8.xml');
-  if (s8) {
-    const d8 = parseXml(await s8.async('string'));
-    const sv8 = d8.getElementsByTagNameNS(XNS, 'sheetView')[0];
-    if (sv8) sv8.removeAttribute('tabSelected');
-    zip.file('xl/worksheets/sheet8.xml', toXml(ser, d8));
-  }
-  // 工作表名稱
+  // ---- 工作表排列：一般版＝7 天＋變更表；送核版＝每天後面接一張變更表（雙面列印用） ----
+  const VT = 'http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes';
+  const PKG = 'http://schemas.openxmlformats.org/package/2006/relationships';
+  const CTNS = 'http://schemas.openxmlformats.org/package/2006/content-types';
+  const REL_WS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet';
+  // 全部工作表用同一份印表機設定，避免 Excel 把整本拆成多個列印工作（雙面會對不上）
+  const binF = zip.file('xl/printerSettings/printerSettings2.bin');
+  const bin = binF ? await binF.async('uint8array') : null;
+  if (bin) for (let i = 1; i <= 8; i++) if (zip.file(`xl/printerSettings/printerSettings${i}.bin`)) zip.file(`xl/printerSettings/printerSettings${i}.bin`, bin);
+  const d8 = parseXml(await zip.file('xl/worksheets/sheet8.xml').async('string'));
+  const sv8 = d8.getElementsByTagNameNS(XNS, 'sheetView')[0];
+  if (sv8) { sv8.removeAttribute('tabSelected'); Array.from(sv8.getElementsByTagNameNS(XNS, 'selection')).forEach(x => { x.setAttribute('activeCell', 'A1'); x.setAttribute('sqref', 'A1'); }); }
+  const chgRels = await zip.file('xl/worksheets/_rels/sheet8.xml.rels').async('string');
   const wbDoc = parseXml(await zip.file('xl/workbook.xml').async('string'));
-  const sheetEls = Array.from(wbDoc.getElementsByTagNameNS(XNS, 'sheet'));
-  for (let i = 0; i < 7; i++) sheetEls[i].setAttribute('name', days[i].sheetName);
+  const relsDoc = parseXml(await zip.file('xl/_rels/workbook.xml.rels').async('string'));
+  const ctDoc = parseXml(await zip.file('[Content_Types].xml').async('string'));
+  const relEls = Array.from(relsDoc.getElementsByTagNameNS(PKG, 'Relationship'));
+  const ridOf = {}; relEls.forEach(r => { ridOf[r.getAttribute('Target')] = r.getAttribute('Id'); });
+  const oldSheets = Array.from(wbDoc.getElementsByTagNameNS(XNS, 'sheet'));
+  const sidOf = {}; oldSheets.forEach(el => { const rid = el.getAttributeNS(RNS, 'id') || el.getAttribute('r:id'); const tgt = Object.keys(ridOf).find(t => ridOf[t] === rid); sidOf[tgt] = el.getAttribute('sheetId'); });
+  let nextSid = Math.max(...oldSheets.map(e => +e.getAttribute('sheetId'))) + 1, nextRid = 1;
+  const defEl = Array.from(wbDoc.getElementsByTagNameNS(XNS, 'definedName')).find(d => d.getAttribute('name') === '_xlnm.Print_Area');
+  const chgRange = defEl ? defEl.textContent.replace(/^.*!/, '') : '$A$1:$AJ$63';
+  const order = [];
+  const addChg = (file, name, i) => {
+    const doc = i === 0 ? d8 : parseXml(toXml(ser, d8));
+    const ws = doc.documentElement;
+    if (ws.hasAttributeNS('http://schemas.microsoft.com/office/spreadsheetml/2014/revision', 'uid')) ws.setAttributeNS('http://schemas.microsoft.com/office/spreadsheetml/2014/revision', 'xr:uid', newGuid(20 + i));
+    zip.file(`xl/worksheets/${file}`, toXml(ser, doc));
+    if (file !== 'sheet8.xml') {
+      const n = file.match(/\d+/)[0];
+      zip.file(`xl/worksheets/_rels/${file}.rels`, chgRels.replace(/printerSettings\d+\.bin/, `printerSettings${n}.bin`));
+      if (bin) zip.file(`xl/printerSettings/printerSettings${n}.bin`, bin);
+      const ov = ctDoc.createElementNS(CTNS, 'Override');
+      ov.setAttribute('PartName', `/xl/worksheets/${file}`); ov.setAttribute('ContentType', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml');
+      ctDoc.documentElement.appendChild(ov);
+    }
+    order.push({ target: `worksheets/${file}`, name, chg: true });
+  };
+  for (let i = 0; i < 7; i++) {
+    order.push({ target: `worksheets/sheet${i + 1}.xml`, name: days[i].sheetName, chg: false });
+    if (opts.duplex) addChg(i === 0 ? 'sheet8.xml' : `sheet${8 + i}.xml`, days[i].sheetName + '變更表', i);
+  }
+  if (!opts.duplex) addChg('sheet8.xml', '勤務變更表', 0);
+  // workbook.xml <sheets>
+  const sheetsEl = wbDoc.getElementsByTagNameNS(XNS, 'sheets')[0];
+  while (sheetsEl.firstChild) sheetsEl.removeChild(sheetsEl.firstChild);
+  order.forEach(o => {
+    let rid = ridOf[o.target];
+    if (!rid) {
+      while (relEls.some(r => r.getAttribute('Id') === 'rIdW' + nextRid)) nextRid++;
+      rid = 'rIdW' + nextRid++;
+      const rel = relsDoc.createElementNS(PKG, 'Relationship');
+      rel.setAttribute('Id', rid); rel.setAttribute('Type', REL_WS); rel.setAttribute('Target', o.target);
+      relsDoc.documentElement.appendChild(rel); relEls.push(rel); ridOf[o.target] = rid;
+    }
+    const el = wbDoc.createElementNS(XNS, 'sheet');
+    el.setAttribute('name', o.name);
+    el.setAttribute('sheetId', sidOf[o.target] || String(nextSid++));
+    el.setAttributeNS(RNS, 'r:id', rid);
+    sheetsEl.appendChild(el);
+  });
+  // 列印範圍（每張變更表各一個）
+  let dns = wbDoc.getElementsByTagNameNS(XNS, 'definedNames')[0];
+  if (!dns) { dns = wbDoc.createElementNS(XNS, 'definedNames'); sheetsEl.parentNode.insertBefore(dns, sheetsEl.nextSibling); }
+  Array.from(dns.childNodes).forEach(n => { if (n.nodeType === 1 && n.getAttribute('name') === '_xlnm.Print_Area') dns.removeChild(n); });
+  const quote = n => /^[A-Za-z_一-鿿][\w一-鿿.]*$/.test(n) && !/^\d/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
+  order.forEach((o, idx) => {
+    if (!o.chg) return;
+    const d = wbDoc.createElementNS(XNS, 'definedName');
+    d.setAttribute('name', '_xlnm.Print_Area'); d.setAttribute('localSheetId', String(idx));
+    d.textContent = `${quote(o.name)}!${chgRange}`;
+    dns.appendChild(d);
+  });
   const bv = wbDoc.getElementsByTagNameNS(XNS, 'workbookView')[0];
   if (bv) { bv.setAttribute('activeTab', '0'); bv.removeAttribute('firstSheet'); }
   zip.file('xl/workbook.xml', toXml(ser, wbDoc));
-  // docProps/app.xml
+  zip.file('xl/_rels/workbook.xml.rels', toXml(ser, relsDoc));
+  zip.file('[Content_Types].xml', toXml(ser, ctDoc));
+  // docProps/app.xml：工作表與具名範圍清單
   const appF = zip.file('docProps/app.xml');
   if (appF) {
     const app = parseXml(await appF.async('string'));
-    const lps = Array.from(app.getElementsByTagNameNS('http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes', 'lpstr'));
-    const titles = lps.slice(2); // 前兩個是「工作表」「具名範圍」
-    for (let i = 0; i < 7 && i < titles.length; i++) titles[i].textContent = days[i].sheetName;
+    const mk = (tag, txt) => { const e = app.createElementNS(VT, 'vt:' + tag); e.textContent = txt; return e; };
+    const vec = (parent, items, base) => {
+      while (parent.firstChild) parent.removeChild(parent.firstChild);
+      const v = app.createElementNS(VT, 'vt:vector'); v.setAttribute('size', String(items.length)); v.setAttribute('baseType', base);
+      items.forEach(x => v.appendChild(x)); parent.appendChild(v);
+    };
+    const nChg = order.filter(o => o.chg).length;
+    const hp = app.getElementsByTagNameNS(app.documentElement.namespaceURI, 'HeadingPairs')[0];
+    const variant = child => { const v = app.createElementNS(VT, 'vt:variant'); v.appendChild(child); return v; };
+    if (hp) vec(hp, [variant(mk('lpstr', '工作表')), variant(mk('i4', String(order.length))), variant(mk('lpstr', '具名範圍')), variant(mk('i4', String(nChg)))], 'variant');
+    const tp = app.getElementsByTagNameNS(app.documentElement.namespaceURI, 'TitlesOfParts')[0];
+    if (tp) vec(tp, order.map(o => mk('lpstr', o.name)).concat(order.filter(o => o.chg).map(o => mk('lpstr', `${quote(o.name)}!Print_Area`))), 'lpstr');
     zip.file('docProps/app.xml', toXml(ser, app));
   }
   return zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', compression: 'DEFLATE' });
@@ -1561,14 +1642,15 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     });
   }
   let busy = false;
-  async function exportWeek(kind) {
+  const EXPORT_BTNS = ['#btnExport', '#btnExportPdf', '#btnDuplexXlsx', '#btnDuplexPdf'];
+  async function exportWeek(kind, duplex) {
     const w = currentWeek(); if (!w || busy) return;
-    const btn = kind === 'pdf' ? $('#btnExportPdf') : $('#btnExport');
+    const btn = $(duplex ? (kind === 'pdf' ? '#btnDuplexPdf' : '#btnDuplexXlsx') : (kind === 'pdf' ? '#btnExportPdf' : '#btnExport'));
     const label = btn.textContent;
-    busy = true; $('#btnExport').disabled = true; $('#btnExportPdf').disabled = true; btn.textContent = '產生中…';
+    busy = true; EXPORT_BTNS.forEach(b => { $(b).disabled = true; }); btn.textContent = '產生中…';
     try {
-      const xlsx = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, weekDaysValues(w), state.settings);
-      const name = E.fileNameFor(w);
+      const xlsx = await window.XLSX_IO.buildWorkbook(window.TEMPLATE_B64, weekDaysValues(w), state.settings, { duplex: !!duplex });
+      const name = duplex ? E.fileNameFor(w).replace(/\.xlsx$/, '_送核版.xlsx') : E.fileNameFor(w);
       if (kind === 'pdf') {
         const pdf = await window.PDF_IO.workbookToPdf(xlsx);
         const pdfName = name.replace(/\.xlsx$/, '.pdf');
@@ -1579,7 +1661,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
         toast('已產生 ' + name);
       }
     } catch (e) { toast('匯出失敗：' + (e.message || e), true); }
-    finally { busy = false; $('#btnExport').disabled = false; $('#btnExportPdf').disabled = false; btn.textContent = label; }
+    finally { busy = false; EXPORT_BTNS.forEach(b => { $(b).disabled = false; }); btn.textContent = label; }
   }
 
   /* ---------- 畫面 ---------- */
@@ -1898,6 +1980,8 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     $('#weekSel').addEventListener('change', e => { state.ui.week = e.target.value; save(); render(); });
     $('#btnExport').addEventListener('click', () => exportWeek('xlsx'));
     $('#btnExportPdf').addEventListener('click', () => exportWeek('pdf'));
+    $('#btnDuplexXlsx').addEventListener('click', () => exportWeek('xlsx', true));
+    $('#btnDuplexPdf').addEventListener('click', () => exportWeek('pdf', true));
     $('#btnSettings').addEventListener('click', () => { state.ui.view = state.ui.view === 'settings' ? 'roster' : 'settings'; save(); render(); window.scrollTo(0, 0); });
     $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
     document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modal').classList.contains('open')) closeModal(); });
