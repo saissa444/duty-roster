@@ -223,6 +223,12 @@ br.m{display:none}
     <button class="btn ghost" id="btnAddTeach">＋ 新增兼課</button>
   </section>
   <section class="card">
+    <h3>自訂假別</h3>
+    <p class="muted small">登錄差假時可以選的其他假別。匯出時寫在「休假」格並括號註明，例如「2(事假)」「3(病假13-17)」。登錄差假時選「自行輸入…」的新假別也會自動加進來。</p>
+    <div class="tags" id="customTypes"></div>
+    <div class="row2"><input id="customTypeIn" maxlength="10" placeholder="例如：婚假"><button class="btn ghost sm" id="btnAddCustomType">新增</button></div>
+  </section>
+  <section class="card">
     <h3>固定公假</h3>
     <p class="muted small">每週固定時間的公假（例如固定會議、受訓），符合的日子會自動登錄成「公假」。</p>
     <ul class="tlist" id="fixedLeaveList"></ul>
@@ -245,7 +251,7 @@ br.m{display:none}
       <button class="btn danger" id="btnWipe">清除全部資料</button>
     </div>
   </section>
-  <p class="ver muted small">女二勤務表 v1.3</p>
+  <p class="ver muted small">女二勤務表 v1.4</p>
 </main>
 
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="sheet" id="modalBody"></div></div>
@@ -532,7 +538,8 @@ function defaultSettings() {
     supervisor: '主管：',
     footer: '＊因應落實職務代理制度，各級幹部因故未在隊或為編排勤務時，請依職務順位落實代理工作，以健全管理作為。\n＊勤務項目可照勤務實際狀況增減\n＊勤務變更請於頁後填記。並經主管核章。',
     teaching: [],
-    fixedLeaves: []
+    fixedLeaves: [],
+    customLeaveTypes: ['事假', '病假', '家庭照顧假']
   };
 }
 
@@ -759,11 +766,17 @@ function computeDay(ctx, iso) {
       listed.add(l.p);
     });
   });
+  // 自訂假別（事假、病假…）寫在「休假」格，括號註明假別
+  leaves.filter(l => !LEAVE_TYPES.includes(l.type)).forEach(l => {
+    const timed = !(l.s === undefined || l.s === null || l.s === '');
+    byType['休假'].push({ p: l.p, txt: `${l.p}(${l.type}${timed ? rangeLabel(+l.s, +l.e) : ''})`, timed: true });
+    listed.add(l.p);
+  });
   PERSONS.forEach(p => { if (!baseShift(ctx, p, iso) && !listed.has(p)) { byType['輪休'].push({ p, txt: p, timed: false }); listed.add(p); } });
   Object.keys(byType).forEach(t => {
     const arr = byType[t].sort((a, b) => ORDER[a.p] - ORDER[b.p]);
     const anyTimed = arr.some(x => x.timed);
-    cells[LEAVE_ADDR[t]] = arr.length ? arr.map(x => x.txt).join(anyTimed ? '、' : '.') : '';
+    cells[LEAVE_ADDR[t]] = arr.length ? wrapLeave(arr.map(x => x.txt), anyTimed ? '、' : '.') : '';
   });
   const total = S.persons.length || 6;
   const off = listed.size;
@@ -784,6 +797,19 @@ function computeDay(ctx, iso) {
   return { iso, star, auto: cells, final, manual, warnings, info: infoMerged, shifts, week };
 }
 
+/* 差假格（約 11 個中文字寬、兩行高）：太長時在「、」或「.」後面換行，不把同一筆拆開 */
+function textUnits(t) { let n = 0; for (const ch of t) n += /[\x00-\x7f]/.test(ch) ? 0.55 : 1; return n; }
+function wrapLeave(items, sep) {
+  const MAX = 11;
+  const lines = [];
+  let cur = '';
+  items.forEach((it, i) => {
+    const piece = it + (i < items.length - 1 ? sep : '');
+    if (cur && textUnits(cur + piece) > MAX) { lines.push(cur); cur = piece; } else cur += piece;
+  });
+  if (cur) lines.push(cur);
+  return lines.join('\n');
+}
 function groupSlots(ks) {
   const out = [];
   ks.forEach(k => {
@@ -965,6 +991,9 @@ async function buildWorkbook(templateB64, days, settings, opts) {
       Array.from(sv.getElementsByTagNameNS(XNS, 'selection')).forEach(s => { s.setAttribute('activeCell', 'A1'); s.setAttribute('sqref', 'A1'); });
     }
     Object.keys(day.values).forEach(a => setCell(doc, sheetData, a, day.values[a]));
+    // 差假欄：輪休、休假、公假比照補休格設定自動換行，名單較長時才不會被截掉
+    const z41 = Array.from(sheetData.getElementsByTagNameNS(XNS, 'c')).find(c => c.getAttribute('r') === 'Z41');
+    if (z41 && z41.getAttribute('s')) Array.from(sheetData.getElementsByTagNameNS(XNS, 'c')).forEach(c => { if (['Z39', 'Z43', 'Z45'].includes(c.getAttribute('r'))) c.setAttribute('s', z41.getAttribute('s')); });
     setCell(doc, sheetData, 'A1', settings.agency);
     setCell(doc, sheetData, 'K1', settings.title);
     settings.persons.forEach((p, idx) => {
@@ -1902,19 +1931,32 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const w = currentWeek(); const iso = E.weekDays(w)[state.ui.day];
     openModal(`<h3>${esc(E.mdLabel(iso))} 登錄差假</h3>
       <label class="fld">人員<select id="lvP">${PERSON_ORDER.map(p => `<option value="${p}">${esc(personLabel(p))}</option>`).join('')}</select></label>
-      <label class="fld">類別<select id="lvT">${E.LEAVE_TYPES.map(t => `<option>${t}</option>`).join('')}</select></label>
+      <label class="fld">假別<select id="lvT">${E.LEAVE_TYPES.concat(state.settings.customLeaveTypes || []).map(t => `<option>${esc(t)}</option>`).join('')}<option value="__custom">自行輸入…</option></select></label>
+      <label class="fld" id="lvCustomWrap" hidden>自行輸入假別<input id="lvCustom" maxlength="10" placeholder="例如：婚假、喪假、公傷假"></label>
       <label class="chk"><input type="checkbox" id="lvAll" checked> 全天</label>
       <div id="lvTime" class="row2" hidden>
         <label class="fld">起<select id="lvS">${hourOptions(13, 0, 23)}</select></label>
         <label class="fld">迄<select id="lvE">${hourOptions(17, 1, 24)}</select></label>
       </div>
-      <p class="muted small">全天：這個人當天的班整個取消。指定時段：只拿掉那段時間，差假欄會寫成「A(13-17)」。</p>
+      <p class="muted small">全天：這個人當天的班整個取消。指定時段：只拿掉那段時間，差假欄會寫成「A(13-17)」。補休、休假、公假以外的假別寫在「休假」格，例如「2(事假)」「3(病假13-17)」。</p>
       <div class="btns"><button class="btn ghost" data-x="cancel">取消</button><button class="btn primary" data-x="ok">加入</button></div>`, body => {
       const all = body.querySelector('#lvAll');
       all.onchange = () => { body.querySelector('#lvTime').hidden = all.checked; };
+      const tsel = body.querySelector('#lvT');
+      tsel.onchange = () => { body.querySelector('#lvCustomWrap').hidden = tsel.value !== '__custom'; if (tsel.value === '__custom') body.querySelector('#lvCustom').focus(); };
       body.querySelector('[data-x=cancel]').onclick = closeModal;
       body.querySelector('[data-x=ok]').onclick = () => {
-        const p = body.querySelector('#lvP').value, t = body.querySelector('#lvT').value;
+        const p = body.querySelector('#lvP').value;
+        let t = body.querySelector('#lvT').value;
+        if (t === '__custom') {
+          t = body.querySelector('#lvCustom').value.trim().replace(/[()（）、.]/g, '');
+          if (!t) { toast('請輸入假別名稱。', true); return; }
+          if (!E.LEAVE_TYPES.includes(t) && t !== '輪休') {
+            const list = state.settings.customLeaveTypes = state.settings.customLeaveTypes || [];
+            if (!list.includes(t)) list.push(t);
+          }
+        }
+        if (t === '輪休') { toast('輪休會依基準表自動帶入，不用登錄。', true); return; }
         const e = edit(iso); e.leaves = e.leaves || [];
         const item = { p, type: t };
         if (!all.checked) {
@@ -1941,6 +1983,7 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
     const item = (t, i, kind) => `<li><div><b>${esc(t.person)}</b> ${esc(personName(t.person))} 每週${WD[+t.weekday]} ${kind === 'fixedLeaves' && t.allDay ? '全天' : E.rangeLabel(+t.from, +t.to)}<br><small class="muted">${t.start ? E.mdLabel(t.start) : '不限'} – ${t.end ? E.mdLabel(t.end) : '不限'}${(t.exclude || []).length ? '・排除 ' + t.exclude.map(E.mdLabel).join('、') : ''}${t.note ? '・' + esc(t.note) : ''}</small></div>
       <span><button class="btn ghost sm" data-redit="${kind}:${i}">編輯</button><button class="btn ghost sm" data-rdel="${kind}:${i}">刪除</button></span></li>`;
     $('#teachList').innerHTML = (S.teaching || []).map((t, i) => item(t, i, 'teaching')).join('') || '<li class="muted">尚未設定</li>';
+    $('#customTypes').innerHTML = (S.customLeaveTypes || []).map((t, i) => `<span class="tag">${esc(t)}<button data-ctdel="${i}" aria-label="移除">✕</button></span>`).join('') || '<span class="muted small">無</span>';
     $('#fixedLeaveList').innerHTML = (S.fixedLeaves || []).map((t, i) => item(t, i, 'fixedLeaves')).join('') || '<li class="muted">尚未設定</li>';
   }
   const KIND = {
@@ -2055,8 +2098,17 @@ window.XLSX_IO = { readWorkbook, buildWorkbook };
       if (el.dataset.pi !== undefined) { state.settings.persons[+el.dataset.pi][el.dataset.pf] = el.value; save(); }
     });
     $('#viewSettings').addEventListener('click', e => {
-      const t = e.target.closest('[data-redit],[data-rdel],#btnAddTeach,#btnAddFixedLeave,#btnBackup,#btnResetHeader,#btnWipe');
+      const t = e.target.closest('[data-redit],[data-rdel],[data-ctdel],#btnAddCustomType,#btnAddTeach,#btnAddFixedLeave,#btnBackup,#btnResetHeader,#btnWipe');
       if (!t) return;
+      if (t.dataset.ctdel !== undefined) { state.settings.customLeaveTypes.splice(+t.dataset.ctdel, 1); save(); render(); return; }
+      if (t.id === 'btnAddCustomType') {
+        const inp = $('#customTypeIn'); const v = inp.value.trim().replace(/[()（）、.]/g, '');
+        if (!v) return;
+        if (E.LEAVE_TYPES.includes(v) || v === '輪休') { toast(`「${v}」本來就有，不用新增。`, true); return; }
+        const list = state.settings.customLeaveTypes = state.settings.customLeaveTypes || [];
+        if (!list.includes(v)) list.push(v);
+        inp.value = ''; save(); render(); return;
+      }
       if (t.dataset.redit) { const [k, n] = t.dataset.redit.split(':'); editRecurring(k, +n); }
       else if (t.dataset.rdel) { const [k, n] = t.dataset.rdel.split(':'); confirmBox(`刪除這筆${KIND[k].name}設定？`, '刪除', () => { state.settings[k].splice(+n, 1); save(); render(); }); }
       else if (t.id === 'btnAddTeach') editRecurring('teaching', -1);
